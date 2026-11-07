@@ -533,7 +533,7 @@ def test_load_dataset_file_missing_refusal() -> None:
         trainer.load_dataset_file("nonexistent_dpo_file.jsonl")
         assert False, "Should raise FileNotFoundError"
     except FileNotFoundError as fnf:
-        assert "run training\\run_data_prep.bat first" in str(fnf)
+        assert "run training/run_data_prep.sh first" in str(fnf)
 
 
 def test_load_dataset_file_missing_columns_refusal() -> None:

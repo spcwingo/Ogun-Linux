@@ -33,5 +33,5 @@ body:
     id: hardware
     attributes:
       label: Your setup
-      description: Output of `run_ogun.bat --hardware-info`.
+      description: Output of `./run_ogun.sh --hardware-info`.
       render: text

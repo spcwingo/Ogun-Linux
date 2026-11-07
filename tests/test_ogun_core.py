@@ -162,11 +162,11 @@ def test_security_guard() -> None:
         except PermissionError:
             pass
 
-        # 7. Core files, main.py, registry.json, and batch scripts immutability
+        # 7. Core files, main.py, registry.json, and shell scripts immutability
         blocked_targets = [
             root / "main.py",
-            root / "run_ogun.bat",
-            root / "test_plugin_builder.bat",
+            root / "run_ogun.sh",
+            root / "test_plugin_builder.sh",
             root / "plugins" / "registry.json",
             root / "training" / "prepare_training_data.py",
             root / "ogun_core" / "paths.py",

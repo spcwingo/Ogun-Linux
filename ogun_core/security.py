@@ -6,7 +6,7 @@ Any write tool invoked by the AI must resolve exclusively to:
   - plugins/tests/
   - workspace/
 
-All other destinations (including ogun_core/, training/, main.py, .bat scripts,
+All other destinations (including ogun_core/, training/, main.py, .sh scripts,
 and plugins/registry.json) are strictly immutable.
 """
 from __future__ import annotations
@@ -102,7 +102,7 @@ class PathSecurityGuard:
         Raises PermissionError if:
           - The path targets ogun_core/ or any file within it
           - The path targets training/ or any file within it
-          - The path targets main.py, registry.json, or any .bat file
+          - The path targets main.py, registry.json, or any .sh file
           - The path is outside plugins/custom_tools/, plugins/tests/, or workspace/
 
         Returns the resolved Path if valid.
@@ -134,10 +134,10 @@ class PathSecurityGuard:
                 f"PermissionError: Modification of entrypoint '{self.main_file}' is forbidden."
             )
 
-        # Check .bat files
-        if target.suffix.lower() == ".bat":
+        # Check .sh files
+        if target.suffix.lower() == ".sh":
             raise PermissionError(
-                f"PermissionError: Modification of Windows batch script '{target}' is forbidden."
+                f"PermissionError: Modification of shell script '{target}' is forbidden."
             )
 
         # Check allowed directories

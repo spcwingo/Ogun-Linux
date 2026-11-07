@@ -4,7 +4,7 @@ Thanks for trying Ogun! It is in **public beta**, and the most useful thing you 
 
 ## How to help
 
-- **Report bugs** and **failed builds** with the issue templates. The build log and `run_ogun.bat --hardware-info` output make problems much easier to fix.
+- **Report bugs** and **failed builds** with the issue templates. The build log and `./run_ogun.sh --hardware-info` output make problems much easier to fix.
 - **Send feedback**: what you used Ogun for, what confused you, and what's missing.
 
 ## Pull requests

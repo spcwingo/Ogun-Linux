@@ -4,10 +4,10 @@
 
 - **Private by design**: no cloud API, no telemetry. Everything runs against your local Ollama.
 - **Self-extending, but contained**: the AI can only write inside `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. It cannot modify Ogun itself.
-- **Plain Python and Windows `.bat` launchers**: nothing to compile, one tiny dependency (`ollama`).
+- **Plain Python and shell-script launchers**: nothing to compile, one tiny dependency (`ollama`).
 - **GPU-aware**: switch between "max speed" and "leave VRAM for other apps" with a chat command.
 
-> **Platform:** Windows 10/11 (the launchers are `.bat` files). The Python code itself is portable, but only Windows has been tested.
+> **Platform:** Linux (the launchers are shell scripts). The Python code itself is portable, but only Linux has been tested.
 > **Status: public beta (v0.1.0-beta).** The chat engine, plugin builder, tool builder and data pipeline are tested and working. The fine-tuning step has **not** been run end to end yet (see [Training](#training-optional)). Please [report what breaks](#feedback-and-bug-reports).
 
 ---
@@ -16,24 +16,24 @@
 
 | What | Why |
 |---|---|
-| **Windows 10/11** | the `.bat` launchers |
-| **Python 3.12** (64-bit, with the `py` launcher) | runs Ogun; the launchers create their own virtual environment |
+| **Linux** | the shell-script launchers |
+| **Python 3.12** | runs Ogun; the launchers create their own virtual environment |
 | **[Ollama](https://ollama.com/download)** | serves the model |
 | **~10 GB free disk** + RAM/VRAM for the model | `qwen2.5-coder:14b` is a ~9 GB download |
 | NVIDIA GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
 
 ## Quick start
 
-```bat
-:: 1. Get the model (once)
+```bash
+# 1. Get the model (once)
 ollama pull qwen2.5-coder:14b
 
-:: 2. Get Ogun
-git clone https://github.com/beckers0347/Ogun.git
-cd Ogun
+# 2. Get Ogun
+git clone https://github.com/spcwingo/Ogun-Linux.git
+cd Ogun-Linux
 
-:: 3. Run it (the first run creates .venv and installs the one dependency)
-run_ogun.bat
+# 3. Run it (the first run creates .venv and installs the one dependency)
+./run_ogun.sh
 ```
 
 You should see a banner and a `Ogun >` prompt. Ask something, or try `/vram status`. The **first reply after starting is slow** (30-40 seconds) because Ollama has to load the model into memory; later replies are fast.
@@ -46,8 +46,8 @@ If Ollama isn't running, Ogun tells you in plain English and exits.
 
 ### Interactive chat
 
-```bat
-run_ogun.bat
+```bash
+./run_ogun.sh
 ```
 
 Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels the current turn.
@@ -71,11 +71,11 @@ Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels
 
 Examples:
 
-```bat
-run_ogun.bat --once "Explain how Python imports work"
-run_ogun.bat --build-plugin "Calculates the CRC32 checksum of a file"
-run_ogun.bat --vram max
-run_ogun.bat --unload
+```bash
+./run_ogun.sh --once "Explain how Python imports work"
+./run_ogun.sh --build-plugin "Calculates the CRC32 checksum of a file"
+./run_ogun.sh --vram max
+./run_ogun.sh --unload
 ```
 
 ### What Ogun can do in a chat turn
@@ -105,10 +105,10 @@ On every start Ogun looks at the computer it is running on and sizes Ollama's ru
 - **Tiers:** High (16 GB+ VRAM or 64 GB+ RAM), Mid (8-12 GB VRAM or 32 GB+ RAM), Low (everything smaller). The report shows the model the tier recommends; Ogun keeps **your** configured model and only falls back to a smaller model you have **already installed** if yours cannot fit. It never downloads anything.
 - **Remembers** the result in `config/hardware_profile.json` (git-ignored) and re-detects when the hardware changes.
 
-```bat
-run_ogun.bat --hardware-info          rem what was detected and what would be used
-run_ogun.bat --force-cpu              rem never touch the GPU
-run_ogun.bat --gpu-layers 30 --ctx 4096 --save-overrides
+```bash
+./run_ogun.sh --hardware-info  # what was detected and what would be used
+./run_ogun.sh --force-cpu  # never touch the GPU
+./run_ogun.sh --gpu-layers 30 --ctx 4096 --save-overrides
 ```
 
 If you pick a split yourself (`--vram`, or the `OGUN_VRAM_PROFILE` / `OGUN_NUM_GPU` environment variables) auto-tuning stays out of the way. Inside a chat, `/vram auto` re-detects and re-tunes (useful after closing a game or a 3D app).
@@ -140,8 +140,8 @@ Idle models are released after **2 minutes** (`keep_alive`), and Ogun unloads th
 
 A plugin is one Python class that inherits `BaseTool`, plus a unit test.
 
-```bat
-run_ogun.bat --build-plugin "Computes the SHA-256 hash of a string"
+```bash
+./run_ogun.sh --build-plugin "Computes the SHA-256 hash of a string"
 ```
 
 What happens:
@@ -154,8 +154,8 @@ What happens:
 
 **Check it works on your machine:**
 
-```bat
-test_plugin_builder.bat
+```bash
+./test_plugin_builder.sh
 ```
 
 This asks the model to build a `StringHasherTool`, then verifies the *mounted* tool itself against `hashlib` on `"hello"`, the empty string and a non-ASCII string, and cleans up after itself. Generating the code can take a few minutes the first time.
@@ -193,12 +193,12 @@ Save it as `plugins/custom_tools/echo_tool.py` and put a plain-Python test in `p
 Plugin builds, tool builds and tool updates have **no attempt limit** by default. After each failure the model gets the test output and tries again. When the same failure repeats, and every third attempt, Ogun first asks the model for a root-cause diagnosis. After five identical failures in a row it throws the code away and starts fresh.
 
 - **Stop a build** with `Ctrl+C`. A stopped update leaves the previous working version in place.
-- **Cap the attempts** with `set OGUN_BUILD_MAX_ATTEMPTS=5`.
+- **Cap the attempts** with `OGUN_BUILD_MAX_ATTEMPTS=5`.
 - On a slow PC or with a request the model can't manage, a build can run for a long time. Watch the console and stop it when you've seen enough.
 
 ## Configuration
 
-All optional. Set them as environment variables before running `run_ogun.bat`.
+All optional. Set them as environment variables before running `./run_ogun.sh`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -219,12 +219,12 @@ Fixed generation settings (in `ogun_core/config.py`): temperature 0.1, top_p 0.9
 
 `training/` contains a local fine-tuning pipeline (DPO, 4-bit LoRA) for Qwen coder models. **You do not need it to use Ogun.**
 
-> **Honest status:** the data pipeline is tested and was run on the full datasets. The trainer's logic, argument handling and `--dry-run` are tested offline, but **no real training run has been completed yet**, and Unsloth on Windows is unverified. Treat it as a starting point.
+> **Honest status:** the data pipeline is tested and was run on the full datasets. The trainer's logic, argument handling and `--dry-run` are tested offline, but **no real training run has been completed yet**, and the Unsloth pipeline is unverified. Treat it as a starting point.
 
 ### 1. Prepare the dataset
 
-```bat
-training\run_data_prep.bat
+```bash
+training/run_data_prep.sh
 ```
 
 Downloads preference datasets, cleans and filters them, and writes `training/data/merged_dpo_dataset.jsonl` (plus a stats file). It needs only the Python standard library (no `datasets` package), is **resumable** (re-run it and it continues), and copes with Hugging Face rate limits (HTTP 429) by waiting and retrying. A full run took ~16 minutes and produced ~60,000 pairs.
@@ -249,10 +249,10 @@ Useful options: `--list-sources`, `--sources vezora,ultrafeedback`, `--max-per-s
 
 ### 2. Fine-tune (needs an NVIDIA GPU)
 
-```bat
-training\run_fine_tune.bat --dry-run      :: validates everything, touches no GPU
-training\run_fine_tune.bat --max-steps 20 :: short smoke test first
-training\run_fine_tune.bat                :: the real run
+```bash
+training/run_fine_tune.sh --dry-run      # validates everything, touches no GPU
+training/run_fine_tune.sh --max-steps 20 # short smoke test first
+training/run_fine_tune.sh                # the real run
 ```
 
 - Uses its **own** virtual environment (`.venv-train`) and `training/requirements-train.txt` (Unsloth, TRL, PyTorch, ...). Read the notes at the top of that file: new NVIDIA cards (RTX 50-series) need a PyTorch build with CUDA 12.8+.
@@ -264,11 +264,11 @@ training\run_fine_tune.bat                :: the real run
 
 The trainer writes a `Modelfile` next to the exported GGUF. A 16-bit GGUF is too big for a 12 GB GPU, so quantize it first with llama.cpp, then register it with Ollama:
 
-```bat
-llama-quantize.exe model-f16.gguf model-Q4_K_M.gguf Q4_K_M
+```bash
+llama-quantize model-f16.gguf model-Q4_K_M.gguf Q4_K_M
 ollama create ogun-coder -f Modelfile
-set OGUN_MODEL=ogun-coder
-run_ogun.bat
+export OGUN_MODEL=ogun-coder
+./run_ogun.sh
 ```
 
 (Edit the `FROM` line in the `Modelfile` to point at the quantized file.) The trainer prints the exact commands when it finishes.
@@ -279,8 +279,8 @@ run_ogun.bat
 
 All offline: no network, no model, no GPU, no pytest. The standard library is enough.
 
-```bat
-py -3.12 tests\run_all.py
+```bash
+python3 tests/run_all.py
 ```
 
 | Suite | Covers |
@@ -304,9 +304,9 @@ py -3.12 tests\run_all.py
 ## Project layout
 
 ```
-Ogun/
-├── run_ogun.bat            launcher: chat + code engine
-├── test_plugin_builder.bat  launcher: end-to-end plugin builder test
+Ogun-Linux/
+├── run_ogun.sh             launcher: chat + code engine
+├── test_plugin_builder.sh   launcher: end-to-end plugin builder test
 ├── main.py                  CLI entry point and chat loop
 ├── requirements.txt         runtime dependencies (ollama)
 ├── test_harness.py          the plugin-builder test
@@ -337,13 +337,13 @@ Every path Ogun uses is resolved relative to its own folder, so you can clone or
 | First reply takes 30-40 s | normal: the model is loading. After 2 idle minutes it unloads and the next reply pays this cost again (`OGUN_KEEP_ALIVE=10m` keeps it longer) |
 | Replies are slow | you're probably on `/vram shared` or `cpu`: try `/vram max` when no other GPU program is running |
 | The GPU runs out of memory | `/vram shared` or `/vram free`; close other GPU programs |
-| `py` is not recognised | install Python 3.12 from python.org with the "py launcher" option |
-| The launcher won't start in a folder with spaces | it quotes paths and works in folders like `C:\Users\Jane Doe\Ogun`; if it fails, re-download and check antivirus quarantine |
+| `python3` is not recognised | install Python 3.12 with your package manager, e.g. `sudo apt install python3.12 python3.12-venv` |
+| The launcher won't start in a folder with spaces | it quotes paths and works in folders like `/home/jane doe/Ogun`; if it fails, make sure the scripts are executable (`chmod +x *.sh training/*.sh`) |
 | A build keeps going without passing | press `Ctrl+C`, reword the request more simply, or write the plugin yourself using the contract above. `OGUN_BUILD_MAX_ATTEMPTS=5` makes builds give up on their own |
 
 ## Known limitations
 
-- **Windows only so far.** The launchers are `.bat` files; macOS and Linux are untested.
+- **Linux only so far.** The launchers are shell scripts; other platforms are untested.
 - **Small local models make mistakes.** Builds can take many attempts, and some requests are beyond the model (stop those with `Ctrl+C`). Larger models do better but need more VRAM.
 - **Slow without a GPU.** CPU-only works, but replies and builds take much longer.
 - **The tool builder is best at single-file Python command-line tools** (text, CSV and JSON processing). Multi-file apps, GUIs and web servers are out of scope for now.
@@ -351,13 +351,13 @@ Every path Ogun uses is resolved relative to its own folder, so you can clone or
 
 ## Feedback and bug reports
 
-Ogun is in public beta and your feedback decides what gets fixed next. Please use [GitHub Issues](https://github.com/beckers0347/Ogun/issues/new/choose):
+Ogun is in public beta and your feedback decides what gets fixed next. Please use [GitHub Issues](https://github.com/spcwingo/Ogun-Linux/issues/new/choose):
 
 - **Bug report**: crashes, errors, wrong behaviour.
 - **Build failed**: a tool or plugin build that failed or produced wrong output. Attach the `.build_log` if you can.
 - **Feedback**: what you used it for, what's missing, what you'd want next.
 
-Including the output of `run_ogun.bat --hardware-info` helps a lot. Pull requests aren't accepted right now; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Including the output of `./run_ogun.sh --hardware-info` helps a lot. Pull requests aren't accepted right now; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

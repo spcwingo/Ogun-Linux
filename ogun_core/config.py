@@ -241,7 +241,7 @@ Always ensure your code is syntactically valid and completely avoids placeholder
 - Numeric Parsing & Statistics: Never use `str.isdigit()` or regex for "is numeric"; use `float(cell.strip())` inside `try...except (ValueError, TypeError)` (handle negatives, decimals, exponents; skip empty cells). When computing multi-column statistics from a stream/CSV, accumulate all columns in a single pass over rows. Never consume an iterator and reuse it.
 - Table Alignment: For table output with columns, calculate each column width as max of header length and data value lengths. Header row, separator line, and all data rows must share identical column widths and separator positions.
 - Safe Path & Error Handling: Wrap file/folder access in `try...except (OSError, PermissionError)` so unreadable, locked, or nonexistent paths produce clean user errors and do not crash. If an input file or folder does not exist or is invalid, print an error to sys.stderr and exit non-zero (sys.exit(1)). NEVER exit 0 on nonexistent or invalid paths.
-- Windows UTF-8 Safety: Prevent `UnicodeEncodeError` when printing non-ASCII text on Windows console. Always configure stdout encoding at startup: `if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')`.
+- UTF-8 Safety: Prevent `UnicodeEncodeError` when printing non-ASCII text under a non-UTF-8 console encoding (e.g. Windows cp1252). Always configure stdout encoding at startup: `if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')`.
 - Test Entry Point Guard: Unit test files must always end with `if __name__ == '__main__': unittest.main()`.
 - Thorough Testing: Author tests that assert real behavior, duplicate grouping by content (not directory), wasted disk space calculations ((count - 1) * file_size), boundary thresholds, and edge cases.
 - Truthful Execution: Never claim files were saved or tests passed unless you executed the real tool calls (`write_file`, `run_python_test`) and they succeeded.
@@ -261,7 +261,7 @@ Your response MUST contain EXACTLY TWO fenced ```python code blocks in this orde
 - No mock stubs, no `# TODO`, no `# mock`, no dummy returns. Implement real operational logic using Python standard libraries.
 - Chunked I/O: Stream large file reads in chunks (never `f.read()` whole files into memory).
 - Robust Error Handling: Catch `OSError`, `PermissionError`, and other exceptions gracefully with informative error messages.
-- Windows UTF-8 Safe: Ensure output strings and print statements handle non-ASCII characters without charmap errors.
+- UTF-8 Safe: Ensure output strings and print statements handle non-ASCII characters without charmap errors.
 
 ### Unit Test Requirements:
 - Standalone runnable via `python plugins/tests/test_<name>.py` (no pytest required).

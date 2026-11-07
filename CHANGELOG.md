@@ -9,7 +9,7 @@
 - Better test-versus-tool blame: crashes inside test code, separator-only mismatches and tests that expect Python type names over the requested words are treated as test defects.
 - Fewer false rules from single words ("header row", "total", "group", "dotted").
 - New output check for tools that report JSON value types (catches `true` reported as a number).
-- Test fixtures are written byte-exact (no Windows line-ending changes), and helpers accept content-only calls.
+- Test fixtures are written byte-exact (no line-ending translation), and helpers accept content-only calls.
 - Plugins: `ToolResult` accepts `result=`/`error=`/`success=` and the `ToolResult.success(...)` / `ToolResult.error(...)` forms.
 - `--build-plugin` follows the same no-limit setting as chat builds.
 - Plugin builds: each fix prompt carries the request, the current tool and test, and the test lines that failed; history resets per attempt; five identical failures start the plugin over; every failed attempt prints its reason.

@@ -418,7 +418,7 @@ total_wasted_bytes = 100
 def test_f6_system_prompt_contains_quality_checklist() -> None:
     """System prompt must provide clear quality guidance for real execution."""
     assert "Chunked File Reading" in SYSTEM_PROMPT
-    assert "Windows UTF-8 Safety" in SYSTEM_PROMPT
+    assert "UTF-8 Safety" in SYSTEM_PROMPT
     assert "Requirements Completeness" in SYSTEM_PROMPT
     assert "Safe Path & Error Handling" in SYSTEM_PROMPT
     assert "Truthful Execution" in SYSTEM_PROMPT
@@ -545,7 +545,7 @@ def test_h1_windows_unicode_cp1252_smoke_and_static_check() -> None:
         tool_file = p_dir / "tool.py"
         good_tool = (
             "import sys, argparse\n"
-            "if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):\n"
+            "if hasattr(sys.stdout, 'reconfigure'):\n"
             "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
             "parser = argparse.ArgumentParser()\n"
             "parser.add_argument('path')\n"
@@ -570,7 +570,7 @@ def test_h2_nonexistent_path_nonzero_exit_smoke_check() -> None:
         tool_file = p_dir / "bad_tool.py"
         bad_tool = (
             "import sys, argparse\n"
-            "if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):\n"
+            "if hasattr(sys.stdout, 'reconfigure'):\n"
             "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
             "parser = argparse.ArgumentParser()\n"
             "parser.add_argument('path')\n"
@@ -603,7 +603,7 @@ def test_h3_standalone_staged_builder_success_and_failure() -> None:
 
     valid_tool = (
         "import sys, os, argparse\n"
-        "if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):\n"
+        "if hasattr(sys.stdout, 'reconfigure'):\n"
         "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
         "parser = argparse.ArgumentParser()\n"
         "parser.add_argument('file')\n"
@@ -677,7 +677,7 @@ def test_r3_fix_stage_no_blocks_escalation() -> None:
 
     good_tool = """
 import sys, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -723,7 +723,7 @@ def test_r3_fix_stage_rejects_stub_and_preserves_tool() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 def process_data(path):
     return [line.strip() for line in open(path, encoding='utf-8')]
@@ -785,7 +785,7 @@ def test_r3_per_attempt_tracing_records_all_fields() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -846,7 +846,7 @@ def test_r3_stuck_failures_rotate_strategy_and_converge() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -917,7 +917,7 @@ def test_r3_regression_rollback_to_best_so_far() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -1054,7 +1054,7 @@ def test_r4_timeout_in_test_stage_preserves_tool() -> None:
 
     tool_code = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -1139,7 +1139,7 @@ def test_r4_timeout_in_fix_stage_preserves_files() -> None:
 
     tool_code = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -1199,7 +1199,7 @@ def test_r4_arbitration_locks_tool_sha_on_test_defect() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -1330,7 +1330,7 @@ def test_r4_quarantine_bad_test_and_skipped_status() -> None:
 
     good_tool = """
 import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('file')
@@ -1391,7 +1391,7 @@ def test_r5_table_alignment_under_max_width_smoke_check() -> None:
     proj_dir = Path(test_dir)
     bad_tab = proj_dir / "tablefmt.py"
     bad_code = """import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('csv_file')
@@ -1410,7 +1410,7 @@ print("2  | AnotherVeryLongName     | HR")
     assert any("Table alignment error" in f or "Table column alignment" in f for f in fails)
 
     good_code = """import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('csv_file')
@@ -1441,7 +1441,7 @@ def test_r5_whole_document_tool_relaxed_advisory_budget() -> None:
     proj_dir = Path(test_dir)
     tool_file = proj_dir / "jsonget.py"
     tool_file.write_text("""import sys, json, os
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
     with open(sys.argv[1], 'r', encoding='utf-8') as f:
@@ -1462,7 +1462,7 @@ def test_r5_identical_regeneration_loop_guard() -> None:
 
     identical_tool = """```python
 import sys, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser()
 parser.add_argument('path')
@@ -1511,7 +1511,7 @@ def test_r5_status_wording_matches_facts_on_disk() -> None:
     st1 = compute_final_status_from_disk(proj_dir, "missing_tool")
     assert st1 == "REQUIREMENT FAILED (tool source file not found on disk)"
 
-    (proj_dir / "sample.py").write_text("import sys, argparse\nif sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')\nparser = argparse.ArgumentParser()\nparser.add_argument('file')\nparser.add_argument('--json', action='store_true')\nargs = parser.parse_args()\nimport os\nif not os.path.exists(args.file): sys.exit(1)\nprint('done')\n", encoding="utf-8")
+    (proj_dir / "sample.py").write_text("import sys, argparse\nif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')\nparser = argparse.ArgumentParser()\nparser.add_argument('file')\nparser.add_argument('--json', action='store_true')\nargs = parser.parse_args()\nimport os\nif not os.path.exists(args.file): sys.exit(1)\nprint('done')\n", encoding="utf-8")
     st2 = compute_final_status_from_disk(proj_dir, "sample", "Build me a tool called sample with --json")
     assert st2 == "NO TESTS GENERATED (test file missing on disk)"
 
@@ -1605,7 +1605,7 @@ def test_r5_coverage_gap_status_when_option_uncovered() -> None:
     from ogun_core.quality import compute_final_status_from_disk
     test_dir = tempfile.mkdtemp()
     proj_dir = Path(test_dir)
-    (proj_dir / "mytool.py").write_text("import sys, argparse\nif sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')\nparser = argparse.ArgumentParser()\nparser.add_argument('file')\nparser.add_argument('--pretty', action='store_true')\nargs = parser.parse_args()\nimport os\nif not os.path.exists(args.file): sys.exit(1)\n", encoding="utf-8")
+    (proj_dir / "mytool.py").write_text("import sys, argparse\nif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')\nparser = argparse.ArgumentParser()\nparser.add_argument('file')\nparser.add_argument('--pretty', action='store_true')\nargs = parser.parse_args()\nimport os\nif not os.path.exists(args.file): sys.exit(1)\n", encoding="utf-8")
     (proj_dir / "test_mytool.py").write_text("""import unittest
 class T(unittest.TestCase):
     def test_basic(self): pass
@@ -1625,7 +1625,7 @@ def test_r6_cli_contract_discovery_multi_arg() -> None:
     proj_dir = Path(test_dir)
     tool_file = proj_dir / "complex_cli.py"
     tool_code = '''import sys, os, argparse
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 parser = argparse.ArgumentParser(description="Complex tool")
 parser.add_argument("src", help="Source file")
@@ -2168,7 +2168,7 @@ def test_r7_offline_regressions() -> None:
         td = Path(tmp_dir)
         u_script = td / "u_test.py"
         u_script.write_text("""import sys
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 print("café résumé naïve 日本語")
 """, encoding="utf-8")

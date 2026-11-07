@@ -2310,7 +2310,8 @@ def classify_tool_input_kind(request_text: str, project_name: str) -> str:
 
 
 def measure_process_peak_rss(pid: int) -> float:
-    """Measure peak working set size (RSS in MB) using Windows kernel GetProcessMemoryInfo with psutil fallback."""
+    """Measure peak working set size (RSS in MB) using Windows kernel GetProcessMemoryInfo,
+    /proc VmHWM on Linux, with psutil fallback."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -2344,6 +2345,15 @@ def measure_process_peak_rss(pid: int) -> float:
                     return peak_bytes / (1024.0 * 1024.0)
             finally:
                 ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+    # Linux: peak RSS is exposed as VmHWM in /proc/<pid>/status (in KiB).
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024.0
     except Exception:
         pass
 

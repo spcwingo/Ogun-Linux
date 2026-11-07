@@ -2,13 +2,13 @@
 """Ogun Unsloth Direct Preference Optimization (DPO) Trainer.
 
 Fine-tunes Qwen2.5-Coder models using 4-bit LoRA and DPO on pre-compiled datasets.
-Designed for Windows 10/11 with NVIDIA RTX 5070 (12GB VRAM).
+Designed for Linux with NVIDIA RTX 5070 (12GB VRAM).
 
 Features:
 - Hardware Guard: Pre-flight VRAM and Disk checks before allocating resources.
 - Merged Dataset Consumer: Reads pre-rendered ChatML DPO pairs directly from JSONL.
 - Dry Run Mode: Lightweight validation and schema check without GPU or model weights.
-- Windows Compatibility: Lazy imports, WinError handling, GGUF export with 16-bit HF fallback.
+- Compatibility: Lazy imports, OS error handling, GGUF export with 16-bit HF fallback.
 - Modelfile Generation: Automatically writes Ollama Modelfile next to the GGUF model.
 """
 from __future__ import annotations
@@ -132,7 +132,7 @@ def check_disk_space(
     try:
         usage = shutil.disk_usage(str(p))
         free_gb = usage.free / (1024**3)
-    except (OSError, WindowsError) as e:
+    except OSError as e:
         return False, 0.0, f"Failed to check disk usage for {p}: {e}"
 
     if free_gb < required_gb:
@@ -462,7 +462,7 @@ def load_dataset_file(
     p = Path(filepath).resolve()
     if not p.exists():
         raise FileNotFoundError(
-            f"Dataset file '{p}' not found. Please run training\\run_data_prep.bat first."
+            f"Dataset file '{p}' not found. Please run training/run_data_prep.sh first."
         )
 
     train_rows: List[Dict[str, Any]] = []
@@ -524,7 +524,7 @@ def load_model_and_tokenizer(
     except ImportError:
         raise ImportError(
             "The 'unsloth' package is required for training. "
-            "Install training dependencies via training\\requirements-train.txt."
+            "Install training dependencies via training/requirements-train.txt."
         )
 
     hf_id = model_name or MODEL_SIZE_MAP.get(model_size.lower())
@@ -590,7 +590,7 @@ def setup_dpo_trainer(
     except ImportError:
         raise ImportError(
             "The 'trl' and 'unsloth' packages are required for training. "
-            "Install training dependencies via training\\requirements-train.txt."
+            "Install training dependencies via training/requirements-train.txt."
         )
 
     PatchDPOTrainer()
@@ -638,7 +638,7 @@ def setup_dpo_trainer(
 
 
 # ==============================================================================
-# 5. EXPORT, MODELFILE & WINDOWS CONVERSION
+# 5. EXPORT, MODELFILE & CONVERSION
 # ==============================================================================
 
 def write_ollama_modelfile(output_dir: Path, gguf_path: Path) -> Path:
@@ -663,14 +663,14 @@ PARAMETER top_p 0.95
 
 
 def print_manual_conversion_instructions(merged_hf_dir: Path, output_dir: Path) -> None:
-    """Print exact llama.cpp CLI commands for Windows manual conversion and quantization."""
+    """Print exact llama.cpp CLI commands for manual conversion and quantization."""
     model_stem = merged_hf_dir.name.replace("_merged_16bit", "")
     f16_gguf = output_dir / f"{model_stem}-f16.gguf"
     q4_gguf = output_dir / f"{model_stem}-Q4_K_M.gguf"
 
     instructions = f"""
 ================================================================================
->>> MANUAL GGUF CONVERSION INSTRUCTIONS (WINDOWS / LLAMA.CPP) <<<
+>>> MANUAL GGUF CONVERSION INSTRUCTIONS (LLAMA.CPP) <<<
 ================================================================================
 The merged 16-bit Hugging Face model weights have been safely saved to:
   {merged_hf_dir}
@@ -678,18 +678,18 @@ The merged 16-bit Hugging Face model weights have been safely saved to:
 Follow these steps to manually convert, quantize, and serve with llama.cpp:
 
 1. Convert merged 16-bit HuggingFace weights to FP16 GGUF:
-   python <LLAMA_CPP_PATH>\\convert_hf_to_gguf.py "{merged_hf_dir}" ^
-     --outfile "{f16_gguf}" ^
+   python <LLAMA_CPP_PATH>/convert_hf_to_gguf.py "{merged_hf_dir}" \
+     --outfile "{f16_gguf}" \
      --outtype f16
 
 2. Quantize FP16 GGUF to Q4_K_M (fits inside RTX 5070 12GB VRAM budget):
-   llama-quantize.exe "{f16_gguf}" "{q4_gguf}" Q4_K_M
+   llama-quantize "{f16_gguf}" "{q4_gguf}" Q4_K_M
 
 3. Serve via llama-server on port 8080:
-   llama-server.exe -m "{q4_gguf}" -c 8192 -ngl 99 --jinja --host 127.0.0.1 --port 8080
+   llama-server -m "{q4_gguf}" -c 8192 -ngl 99 --jinja --host 127.0.0.1 --port 8080
 
 4. Point Ogun at the quantized model in Ollama:
-   ollama create ogun-coder -f "{output_dir}\\Modelfile"
+   ollama create ogun-coder -f "{output_dir}/Modelfile"
 ================================================================================
 """
     print(instructions)

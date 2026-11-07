@@ -20,6 +20,22 @@ from unittest.mock import patch, MagicMock
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
+try:
+    import winreg  # noqa: F401
+except ImportError:
+    # Non-Windows interpreters have no winreg module, but the probing tests
+    # below simulate Windows hardware by patching it. Register a stub module
+    # so unittest.mock.patch("winreg.OpenKey", ...) has something to patch.
+    import types
+
+    _winreg_stub = types.ModuleType("winreg")
+    _winreg_stub.HKEY_LOCAL_MACHINE = 0x80000002
+    _winreg_stub.OpenKey = MagicMock()
+    _winreg_stub.QueryValueEx = MagicMock()
+    _winreg_stub.QueryInfoKey = MagicMock()
+    _winreg_stub.EnumKey = MagicMock()
+    sys.modules["winreg"] = _winreg_stub
+
 from ogun_core import hardware
 from ogun_core.hardware import (
     GpuInfo,
