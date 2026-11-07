@@ -19,7 +19,7 @@ fi
 echo "======================================================================"
 echo " Ogun Unsloth DPO Fine-Tuning Launcher"
 echo "======================================================================"
-echo "[ADVISORY] Training requires >= 11 GB free VRAM on NVIDIA RTX 5070 (12 GB)."
+echo "[ADVISORY] Training requires >= 11 GB free VRAM on a 12 GB-class GPU (NVIDIA CUDA or AMD ROCm)."
 echo "Please close Ollama, Blender, Unreal Engine, and browser hardware acceleration"
 echo "to prevent GPU out-of-memory (OOM) errors."
 echo "======================================================================"
@@ -33,8 +33,27 @@ if [ ! -x "$VENV_PY" ]; then
 fi
 
 # 4. Dependency caching
+# Select the dependency set for the GPU backend: ROCm when requested
+# (OGUN_TRAIN_BACKEND=rocm) or when rocm-smi is present without nvidia-smi.
+case "${OGUN_TRAIN_BACKEND:-auto}" in
+    rocm) TRAIN_BACKEND="rocm" ;;
+    cuda) TRAIN_BACKEND="cuda" ;;
+    *)
+        if command -v rocm-smi >/dev/null 2>&1 && ! command -v nvidia-smi >/dev/null 2>&1; then
+            TRAIN_BACKEND="rocm"
+        else
+            TRAIN_BACKEND="cuda"
+        fi
+        ;;
+esac
+if [ "$TRAIN_BACKEND" = "rocm" ]; then
+    REQ="training/requirements-train-rocm.txt"
+else
+    REQ="training/requirements-train.txt"
+fi
+echo "[*] Training backend: $TRAIN_BACKEND (dependencies: $REQ)"
+
 STAMP=".venv-train/.pip_train_stamp"
-REQ="training/requirements-train.txt"
 NEED_INSTALL=0
 
 if [ ! -f "$STAMP" ]; then

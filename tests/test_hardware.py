@@ -662,6 +662,54 @@ def test_query_ollama_reads_installed_specs_and_resident_memory():
         urllib.request.urlopen = orig
 
 
+def test_amd_linux_probe_product_name() -> None:
+    mem_json = json.dumps({"0": {"VRAM Total Memory (B)": str(16 * 1024**3), "VRAM Total Used Memory (B)": str(2 * 1024**3)}})
+    prod_json = json.dumps({"0": {"Card Series": "AMD Radeon RX 7900 XTX", "Card Model": "Navi 31"}})
+
+    def fake_run(cmd, timeout=None):
+        if "--showproductname" in cmd:
+            return 0, prod_json
+        return 0, mem_json
+
+    with patch("ogun_core.hardware._run_subproc", side_effect=fake_run):
+        gpus = hardware._probe_amd_gpus("linux", 2.0, [])
+    assert len(gpus) == 1
+    assert gpus[0].vendor == "amd"
+    assert gpus[0].name == "AMD Radeon RX 7900 XTX"
+    assert gpus[0].vram_total_gb == 16.0
+    assert gpus[0].vram_free_gb == 14.0
+
+
+def test_intel_linux_probe_sysfs() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # Discrete Arc-like card: 16 GB total, 2 GB used
+        dev = root / "card0" / "device"
+        dev.mkdir(parents=True)
+        (dev / "vendor").write_text("0x8086\n")
+        (dev / "mem_info_vram_total").write_text(str(16 * 1024**3))
+        (dev / "mem_info_vram_used").write_text(str(2 * 1024**3))
+        # Integrated GPU: Intel vendor but no VRAM files -> skipped
+        dev2 = root / "card1" / "device"
+        dev2.mkdir(parents=True)
+        (dev2 / "vendor").write_text("0x8086\n")
+        # Non-Intel card with VRAM files -> skipped
+        dev3 = root / "card2" / "device"
+        dev3.mkdir(parents=True)
+        (dev3 / "vendor").write_text("0x10de\n")
+        (dev3 / "mem_info_vram_total").write_text(str(12 * 1024**3))
+
+        lspci_out = "03:00.0 VGA compatible controller [0300]: Intel Corporation DG2 [Arc A770] [8086:56a0] (rev 08)\n"
+        with patch("ogun_core.hardware._run_subproc", return_value=(0, lspci_out)):
+            notes: list = []
+            gpus = hardware._probe_intel_gpus("linux", notes, drm_root=str(root))
+        assert len(gpus) == 1, gpus
+        assert gpus[0].vendor == "intel"
+        assert "Arc A770" in gpus[0].name
+        assert gpus[0].vram_total_gb == 16.0
+        assert gpus[0].vram_free_gb == 14.0
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

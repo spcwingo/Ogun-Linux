@@ -2,7 +2,7 @@
 """Ogun Unsloth Direct Preference Optimization (DPO) Trainer.
 
 Fine-tunes Qwen2.5-Coder models using 4-bit LoRA and DPO on pre-compiled datasets.
-Designed for Linux with NVIDIA RTX 5070 (12GB VRAM).
+Designed for Linux with a 12 GB-class GPU (NVIDIA RTX 5070 / CUDA or AMD Radeon RX 7000-9000 / ROCm).
 
 Features:
 - Hardware Guard: Pre-flight VRAM and Disk checks before allocating resources.
@@ -52,15 +52,44 @@ REQUIRED_EXPORT_DISK_GB = 30.0         # ~30 GB required for 14B f16 GGUF export
 # 1. HARDWARE & DISK GUARDS
 # ==============================================================================
 
+def detect_compute_backend(torch_module: Any = None) -> str:
+    """Detect the GPU compute backend exposed by the installed torch build.
+
+    Returns "rocm" for ROCm/HIP builds, "cuda" for CUDA builds, and "none"
+    when no GPU backend is usable. PyTorch's ROCm builds expose the HIP
+    runtime through the torch.cuda namespace, so availability is probed
+    there and torch.version.hip tells the two apart.
+    """
+    torch = torch_module
+    if torch is None:
+        try:
+            import torch as torch
+        except Exception:
+            return "none"
+    try:
+        if not torch.cuda.is_available():
+            return "none"
+        hip_version = getattr(getattr(torch, "version", None), "hip", None)
+        return "rocm" if hip_version else "cuda"
+    except Exception:
+        return "none"
+
+
 def check_vram_preflight(
     model_size: str,
     force: bool = False,
     min_free_vram_bytes: int = REQUIRED_VRAM_BYTES,
     mem_get_info_fn: Optional[Callable[[], Tuple[int, int]]] = None,
     is_available_fn: Optional[Callable[[], bool]] = None,
+    backend: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Perform pre-flight VRAM verification before attempting GPU allocations."""
     norm_size = model_size.lower().strip()
+
+    # Resolve the compute backend so messages name CUDA vs ROCm accurately
+    if backend is None:
+        backend = detect_compute_backend()
+    backend_name = {"cuda": "CUDA", "rocm": "ROCm"}.get(backend)
 
     # 1. Reject 32B model on 12GB hardware unless forced
     if norm_size == "32b" and not force:
@@ -71,7 +100,8 @@ def check_vram_preflight(
         )
         return False, msg
 
-    # Resolve CUDA detection functions (lazy-import torch if not provided)
+    # Resolve GPU detection functions (lazy-import torch if not provided;
+    # torch.cuda.* covers both CUDA and ROCm/HIP builds)
     if is_available_fn is None:
         try:
             import torch
@@ -81,9 +111,13 @@ def check_vram_preflight(
             is_available_fn = lambda: False
 
     if not is_available_fn():
+        if backend_name:
+            unavailable = f"{backend_name} is not available"
+        else:
+            unavailable = "No GPU backend is available (CUDA or ROCm)"
         if force:
-            return True, "CUDA is not available, but proceeding due to --force flag."
-        return False, "Refusing to proceed: CUDA is not available. GPU is required for DPO training."
+            return True, f"{unavailable}, but proceeding due to --force flag."
+        return False, f"Refusing to proceed: {unavailable}. GPU is required for DPO training."
 
     # Inspect free VRAM
     if mem_get_info_fn is None:
@@ -116,6 +150,8 @@ def check_vram_preflight(
         return True, f"VRAM Warning bypassed via --force: {msg}"
 
     msg = f"VRAM Pre-Flight Passed: {free_gb:.2f}GB free of {total_gb:.2f}GB total (>= {min_gb:.1f}GB required)."
+    if backend_name:
+        msg += f" Backend: {backend_name}."
     return True, msg
 
 
@@ -146,7 +182,7 @@ def check_disk_space(
 
 
 def check_bf16_support(is_bf16_fn: Optional[Callable[[], bool]] = None) -> bool:
-    """Check if hardware supports native bfloat16."""
+    """Check if hardware supports native bfloat16 (exposed via torch.cuda on both CUDA and ROCm builds)."""
     if is_bf16_fn is not None:
         return is_bf16_fn()
     try:
@@ -682,7 +718,7 @@ Follow these steps to manually convert, quantize, and serve with llama.cpp:
      --outfile "{f16_gguf}" \
      --outtype f16
 
-2. Quantize FP16 GGUF to Q4_K_M (fits inside RTX 5070 12GB VRAM budget):
+2. Quantize FP16 GGUF to Q4_K_M (fits inside a 12 GB VRAM budget):
    llama-quantize "{f16_gguf}" "{q4_gguf}" Q4_K_M
 
 3. Serve via llama-server on port 8080:

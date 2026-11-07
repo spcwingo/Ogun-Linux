@@ -20,7 +20,7 @@
 | **Python 3.12** | runs Ogun; the launchers create their own virtual environment |
 | **[Ollama](https://ollama.com/download)** | serves the model |
 | **~10 GB free disk** + RAM/VRAM for the model | `qwen2.5-coder:14b` is a ~9 GB download |
-| NVIDIA GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
+| NVIDIA or AMD GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
 
 ## Quick start
 
@@ -100,7 +100,7 @@ Ogun writes the tool, a unit test suite and a README, then checks the result its
 
 On every start Ogun looks at the computer it is running on and sizes Ollama's runtime to fit, then prints a short report:
 
-- **Detects** RAM (total/free), the GPU (NVIDIA, AMD or Apple; VRAM total/free), CPU cores and AVX2/AVX-512/NEON. No GPU or no driver tools? It falls back to CPU-only instead of failing.
+- **Detects** RAM (total/free), the GPU (NVIDIA, AMD, Intel or Apple; VRAM total/free), CPU cores and AVX2/AVX-512/NEON. No GPU or no driver tools? It falls back to CPU-only instead of failing.
 - **Chooses** how many layers go on the GPU from the VRAM that is actually **free right now**, keeping a 1.5-2 GB safety buffer; a context window of 4096-16384 tokens depending on memory headroom; and one CPU thread per physical core.
 - **Tiers:** High (16 GB+ VRAM or 64 GB+ RAM), Mid (8-12 GB VRAM or 32 GB+ RAM), Low (everything smaller). The report shows the model the tier recommends; Ogun keeps **your** configured model and only falls back to a smaller model you have **already installed** if yours cannot fit. It never downloads anything.
 - **Remembers** the result in `config/hardware_profile.json` (git-ignored) and re-detects when the hardware changes.
@@ -247,7 +247,7 @@ Notes:
 
 Useful options: `--list-sources`, `--sources vezora,ultrafeedback`, `--max-per-source 2000` (a small test run), `--max-chars`, `--selftest`, `--verify`, `--offline`, `--refresh`.
 
-### 2. Fine-tune (needs an NVIDIA GPU)
+### 2. Fine-tune (needs an NVIDIA or AMD GPU)
 
 ```bash
 training/run_fine_tune.sh --dry-run      # validates everything, touches no GPU
@@ -256,6 +256,10 @@ training/run_fine_tune.sh                # the real run
 ```
 
 - Uses its **own** virtual environment (`.venv-train`) and `training/requirements-train.txt` (Unsloth, TRL, PyTorch, ...). Read the notes at the top of that file: new NVIDIA cards (RTX 50-series) need a PyTorch build with CUDA 12.8+.
+
+**AMD GPUs are supported too.** The trainer also runs on AMD hardware through ROCm — Unsloth supports RDNA 3 and newer (Radeon RX 7000/9000 series) and Instinct cards. The launcher installs `training/requirements-train-rocm.txt` (PyTorch's ROCm build) automatically when it finds `rocm-smi` without `nvidia-smi`; force either backend with `OGUN_TRAIN_BACKEND=rocm` or `OGUN_TRAIN_BACKEND=cuda`. The trainer detects the backend itself and names it (CUDA or ROCm) in its pre-flight checks.
+
+**Intel Arc** cards are detected and tuned for chat (run them through Ollama's Vulkan backend); fine-tuning on Intel GPUs is not supported.
 - Needs ~11 GB of **free** VRAM for the 14B model: close Ollama, Blender, Unreal and other GPU programs first. `--model-size 32b` is refused unless you pass `--force`.
 - Tool-calling pairs are long (their prompts include the tool definitions), so at the default `--max-seq-length 1024` most of them are filtered out and the trainer says so. Raise `--max-seq-length` / `--max-prompt-length` if your GPU allows.
 - The LoRA adapter is saved **before** the 16-bit GGUF export (~30 GB for the 14B model; the script checks free disk first). `--skip-gguf` trains and saves the adapter only.

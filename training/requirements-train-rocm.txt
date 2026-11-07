@@ -1,0 +1,32 @@
+# Ogun DPO Fine-Tuning Dependencies - AMD ROCm variant
+# Target Hardware: AMD Radeon RX 7000/9000 series (RDNA 3/4) or Instinct (CDNA), Linux
+# Python: 3.12 64-bit with ROCm 7.2
+#
+# Installation Notes:
+# -----------------------------------------------------------------------------
+# Same dependency set as training/requirements-train.txt, except PyTorch is
+# pinned to the ROCm build from AMD's wheel index: the default PyPI torch
+# wheel is the CUDA build and cannot use an AMD GPU. The launcher
+# (training/run_fine_tune.sh) selects this file automatically when
+# OGUN_TRAIN_BACKEND=rocm, or when rocm-smi is present and nvidia-smi is not.
+#
+# Unsloth supports AMD GPUs through ROCm (RDNA 3 and newer); recent
+# bitsandbytes PyPI wheels include ROCm builds for 4-bit QLoRA. If your card
+# is not covered by the bitsandbytes wheel, install the ROCm build from the
+# bitsandbytes-foundation "continuous-release" wheels instead.
+#
+# If pip ever resolves the plain PyPI (CUDA) torch wheel instead of the
+# +rocm7.2 one, install torch explicitly first:
+#   pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/rocm7.2
+# -----------------------------------------------------------------------------
+
+--extra-index-url https://download.pytorch.org/whl/rocm7.2
+
+torch==2.14.1
+transformers>=4.46.0
+datasets>=3.0.0
+accelerate>=1.0.0
+peft>=0.13.0
+trl>=0.12.0
+bitsandbytes>=0.43.0
+unsloth>=2024.10

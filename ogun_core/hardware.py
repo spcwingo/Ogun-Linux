@@ -436,12 +436,31 @@ def _probe_nvidia_gpus(timeout: float, notes: List[str]) -> List[GpuInfo]:
     return gpus
 
 
+def _probe_amd_product_names(timeout: float) -> Dict[str, str]:
+    """Best-effort AMD GPU product names from rocm-smi (Linux), keyed by card index."""
+    names: Dict[str, str] = {}
+    rc, out = _run_subproc(["rocm-smi", "--showproductname", "--json"], timeout=min(timeout, 2.5))
+    if rc != 0:
+        return names
+    try:
+        data = json.loads(out)
+        for idx_str, info in data.items():
+            if isinstance(info, dict):
+                name = info.get("Card Series") or info.get("Card Model")
+                if isinstance(name, str) and name.strip():
+                    names[str(idx_str)] = name.strip()
+    except Exception:
+        pass
+    return names
+
+
 def _probe_amd_gpus(sys_os: str, timeout: float, notes: List[str]) -> List[GpuInfo]:
     """Probe AMD GPUs on Windows or Linux."""
     gpus: List[GpuInfo] = []
     if sys_os == "linux":
         rc, out = _run_subproc(["rocm-smi", "--showmeminfo", "vram", "--json"], timeout=min(timeout, 2.5))
         if rc == 0:
+            names = _probe_amd_product_names(timeout)
             try:
                 data = json.loads(out)
                 for idx_str, info in data.items():
@@ -451,7 +470,7 @@ def _probe_amd_gpus(sys_os: str, timeout: float, notes: List[str]) -> List[GpuIn
                     gpus.append(
                         GpuInfo(
                             vendor="amd",
-                            name=f"AMD ROCm GPU {idx_str}",
+                            name=names.get(str(idx_str), f"AMD ROCm GPU {idx_str}"),
                             vram_total_gb=round(tot, 2),
                             vram_free_gb=round(free, 2),
                             unified_memory=False,
@@ -505,10 +524,119 @@ def _probe_amd_gpus(sys_os: str, timeout: float, notes: List[str]) -> List[GpuIn
     return gpus
 
 
-def _probe_intel_gpus(sys_os: str, notes: List[str]) -> List[GpuInfo]:
+def _read_sysfs_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _read_sysfs_int(path: Path) -> Optional[int]:
+    text = _read_sysfs_text(path)
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_vram_value(device_dir: Path, filename: str) -> Optional[int]:
+    """Read a mem_info_* value from a DRM device dir, checking one tile level down."""
+    direct = _read_sysfs_int(device_dir / filename)
+    if direct is not None:
+        return direct
+    for sub_path in sorted(device_dir.glob(f"*/{filename}")):
+        value = _read_sysfs_int(sub_path)
+        if value is not None:
+            return value
+    return None
+
+
+def _probe_intel_gpu_names_lspci() -> List[str]:
+    """Best-effort Intel display-device names from lspci (Linux), in PCI order."""
+    names: List[str] = []
+    rc, out = _run_subproc(["lspci", "-nn"], timeout=2.0)
+    if rc != 0:
+        return names
+    for line in out.splitlines():
+        low = line.lower()
+        if "intel" not in low:
+            continue
+        if not any(k in low for k in ("vga compatible controller", "display controller", "3d controller")):
+            continue
+        # "03:00.0 VGA compatible controller [0300]: Intel Corporation DG2 [Arc A770] [8086:56a0] (rev 08)"
+        idx = line.rfind("]: ")
+        if idx == -1:
+            continue
+        name = line[idx + 3:]
+        bracket = name.rfind(" [8086:")
+        if bracket != -1:
+            name = name[:bracket]
+        rev = name.rfind(" (rev ")
+        if rev != -1:
+            name = name[:rev]
+        name = name.strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _probe_intel_gpus_linux(notes: List[str], drm_root: str = "/sys/class/drm") -> List[GpuInfo]:
+    """Probe Intel dedicated GPUs on Linux via DRM sysfs (i915/xe drivers).
+
+    Discrete Arc cards expose mem_info_vram_total under their DRM device
+    directory; integrated GPUs share system RAM and expose no such file, so
+    they are skipped (the same known-VRAM rule the Windows registry probe
+    uses). Free VRAM comes from mem_info_vram_used when present and falls
+    back to the total-minus-1.5GB estimate used by the other probes.
+    """
+    gpus: List[GpuInfo] = []
+    root = Path(drm_root)
+    try:
+        card_dirs = sorted(d for d in root.glob("card*") if d.name[4:].isdigit())
+    except Exception:
+        return gpus
+    names = _probe_intel_gpu_names_lspci()
+    name_idx = 0
+    for card_dir in card_dirs:
+        device_dir = card_dir / "device"
+        if _read_sysfs_text(device_dir / "vendor") != "0x8086":
+            continue
+        total_bytes = _find_vram_value(device_dir, "mem_info_vram_total")
+        if not total_bytes:
+            continue  # integrated GPU or unknown VRAM: not actionable for tuning
+        tot_gb = round(total_bytes / (1024**3), 2)
+        if tot_gb < 6.0:
+            notes.append(f"Intel GPU ({tot_gb} GB) detected but below 6 GB threshold; CPU-only.")
+            continue
+        used_bytes = _find_vram_value(device_dir, "mem_info_vram_used")
+        if used_bytes is not None:
+            free_gb = max(0.0, round(tot_gb - used_bytes / (1024**3), 2))
+        else:
+            free_gb = max(0.0, round(tot_gb - 1.5, 2))
+            notes.append("Intel Linux: free VRAM estimated as total - 1.5 GB.")
+        name = names[name_idx] if name_idx < len(names) else f"Intel GPU {name_idx}"
+        name_idx += 1
+        gpus.append(
+            GpuInfo(
+                vendor="intel",
+                name=name,
+                vram_total_gb=tot_gb,
+                vram_free_gb=free_gb,
+                unified_memory=False,
+                driver="",
+                compute_capability="",
+                index=len(gpus),
+            )
+        )
+    return gpus
+
+
+def _probe_intel_gpus(sys_os: str, notes: List[str], drm_root: str = "/sys/class/drm") -> List[GpuInfo]:
     """Probe Intel GPUs (Arc dedicated vs iGPU)."""
     gpus: List[GpuInfo] = []
-    if sys_os == "windows":
+    if sys_os == "linux":
+        gpus.extend(_probe_intel_gpus_linux(notes, drm_root))
+    elif sys_os == "windows":
         try:
             import winreg  # type: ignore
             base_key = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"

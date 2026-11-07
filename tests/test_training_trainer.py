@@ -158,9 +158,54 @@ def test_vram_guard_cuda_unavailable() -> None:
         model_size="14b",
         force=False,
         is_available_fn=lambda: False,
+        backend="cuda",
     )
     assert not passed
     assert "CUDA is not available" in msg
+
+
+def test_vram_guard_rocm_unavailable() -> None:
+    passed, msg = trainer.check_vram_preflight(
+        model_size="14b",
+        force=False,
+        is_available_fn=lambda: False,
+        backend="rocm",
+    )
+    assert not passed
+    assert "ROCm is not available" in msg
+
+
+def test_vram_guard_no_backend_unavailable() -> None:
+    passed, msg = trainer.check_vram_preflight(
+        model_size="14b",
+        force=False,
+        is_available_fn=lambda: False,
+        backend="none",
+    )
+    assert not passed
+    assert "No GPU backend is available" in msg
+
+
+def _fake_torch(available: bool, hip_version) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: available),
+        version=SimpleNamespace(hip=hip_version),
+    )
+
+
+def test_detect_compute_backend_rocm() -> None:
+    assert trainer.detect_compute_backend(_fake_torch(True, "7.2.0")) == "rocm"
+
+
+def test_detect_compute_backend_cuda() -> None:
+    assert trainer.detect_compute_backend(_fake_torch(True, None)) == "cuda"
+
+
+def test_detect_compute_backend_none() -> None:
+    assert trainer.detect_compute_backend(_fake_torch(False, None)) == "none"
+    assert trainer.detect_compute_backend(_fake_torch(False, "7.2.0")) == "none"
 
 
 def test_disk_guard_sufficient_space() -> None:
@@ -596,6 +641,11 @@ def run_all_tests() -> bool:
         test_vram_guard_32b_refuses,
         test_vram_guard_32b_with_force_proceeds,
         test_vram_guard_cuda_unavailable,
+        test_vram_guard_rocm_unavailable,
+        test_vram_guard_no_backend_unavailable,
+        test_detect_compute_backend_rocm,
+        test_detect_compute_backend_cuda,
+        test_detect_compute_backend_none,
         test_disk_guard_sufficient_space,
         test_disk_guard_insufficient_space,
         test_disk_guard_handles_winerror,

@@ -1,6 +1,8 @@
 # Ogun DPO Fine-Tuning Dependencies
 # Target Hardware: NVIDIA GeForce RTX 5070 (12 GB VRAM, Blackwell sm_120), Linux
 # Python: 3.12 64-bit with CUDA 12.8
+# AMD GPU instead? training/requirements-train-rocm.txt is the ROCm variant of
+# this file; training/run_fine_tune.sh selects it automatically on ROCm systems.
 #
 # Workstation Installation Notes:
 # -----------------------------------------------------------------------------
