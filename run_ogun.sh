@@ -14,6 +14,17 @@ if [ ! -x "$VENV_PY" ]; then
     fi
 fi
 
+# A pre-existing venv only works with the exact Python that created it:
+# if that Python moved or was upgraded, the venv interpreter cannot load
+# the standard library ("No module named 'encodings'"). Detect and rebuild.
+if ! "$VENV_PY" -c "import encodings" >/dev/null 2>&1; then
+    echo "[!] Existing .venv is unusable (its Python cannot load the standard library). Recreating..."
+    rm -rf .venv
+    if ! python3.12 -m venv .venv 2>/dev/null; then
+        python3 -m venv .venv
+    fi
+fi
+
 # 2. Pip Requirement Timestamp Cache
 STAMP=".venv/.pip_stamp"
 REQ="requirements.txt"

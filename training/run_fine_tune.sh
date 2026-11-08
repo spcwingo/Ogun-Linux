@@ -32,6 +32,17 @@ if [ ! -x "$VENV_PY" ]; then
     fi
 fi
 
+# A pre-existing venv only works with the exact Python that created it:
+# if that Python moved or was upgraded, the venv interpreter cannot load
+# the standard library ("No module named 'encodings'"). Detect and rebuild.
+if ! "$VENV_PY" -c "import encodings" >/dev/null 2>&1; then
+    echo "[!] Existing .venv-train is unusable (its Python cannot load the standard library). Recreating..."
+    rm -rf .venv-train
+    if ! python3.12 -m venv .venv-train 2>/dev/null; then
+        python3 -m venv .venv-train
+    fi
+fi
+
 # 4. Dependency caching
 # Select the dependency set for the GPU backend: ROCm when requested
 # (OGUN_TRAIN_BACKEND=rocm) or when rocm-smi is present without nvidia-smi.
