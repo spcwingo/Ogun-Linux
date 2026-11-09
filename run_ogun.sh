@@ -7,21 +7,51 @@ cd "$SCRIPT_DIR" || exit 1
 VENV_PY=".venv/bin/python"
 
 # 1. Virtual Environment Bootstrap
-if [ ! -x "$VENV_PY" ]; then
-    echo "[*] Creating virtual environment .venv..."
-    if ! python3.12 -m venv .venv 2>/dev/null; then
-        python3 -m venv .venv
-    fi
-fi
+# A venv is only as good as the Python that created it. A stale venv whose
+# base Python moved, or a Python whose own venvs come out broken (some
+# standalone/uv-managed builds resolve the new interpreter's standard
+# library to a leftover build-machine path), yields a python that dies
+# with "No module named 'encodings'". So: reuse .venv only if its
+# interpreter actually runs; otherwise rebuild, trying each Python
+# candidate in turn and verifying the result before accepting it.
+venv_healthy() {
+    [ -x "$VENV_PY" ] && "$VENV_PY" -c "import encodings" >/dev/null 2>&1
+}
 
-# A pre-existing venv only works with the exact Python that created it:
-# if that Python moved or was upgraded, the venv interpreter cannot load
-# the standard library ("No module named 'encodings'"). Detect and rebuild.
-if ! "$VENV_PY" -c "import encodings" >/dev/null 2>&1; then
-    echo "[!] Existing .venv is unusable (its Python cannot load the standard library). Recreating..."
+try_create_venv() {
+    # $1 = python executable; returns 0 only if it leaves a WORKING venv
     rm -rf .venv
-    if ! python3.12 -m venv .venv 2>/dev/null; then
-        python3 -m venv .venv
+    echo "[*] Creating virtual environment .venv with $1..."
+    "$1" -m venv .venv >/dev/null 2>&1 || return 1
+    venv_healthy
+}
+
+if ! venv_healthy; then
+    CREATED=0
+    for CAND in python3.12 python3 /usr/bin/python3.12 /usr/bin/python3; do
+        if [ -x "$CAND" ] || command -v "$CAND" >/dev/null 2>&1; then
+            if try_create_venv "$CAND"; then
+                CREATED=1
+                break
+            fi
+        fi
+    done
+    # Last resort: uv (whose managed Pythons are one source of broken
+    # venvs) knows how to build a working venv from them.
+    if [ "$CREATED" -eq 0 ] && command -v uv >/dev/null 2>&1; then
+        echo "[*] Creating virtual environment .venv with uv..."
+        rm -rf .venv
+        if uv venv .venv --python 3.12 --seed >/dev/null 2>&1 && venv_healthy; then
+            CREATED=1
+        fi
+    fi
+    if [ "$CREATED" -eq 0 ]; then
+        echo "[ERROR] No available Python could create a working virtual environment." >&2
+        echo "        The Python installation itself is producing broken venvs." >&2
+        echo "        Fixes: run 'uv venv .venv --python 3.12 --seed' by hand, then re-run this script;" >&2
+        echo "        or install your distribution's python3.12 and python3.12-venv packages." >&2
+        rm -rf .venv
+        exit 1
     fi
 fi
 
