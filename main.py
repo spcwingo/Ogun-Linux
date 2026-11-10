@@ -34,13 +34,48 @@ def is_unload_command(text: str) -> bool:
     return " ".join((text or "").lower().replace("?", " ").replace(".", " ").split()) in UNLOAD_PHRASES
 
 
-_PROVIDER_CMD = re.compile(r"^\s*/provider(?:\s+(\S+)(?:\s+(\S+))?)?\s*$", re.IGNORECASE)
+_PROVIDER_CMD = re.compile(r"^\s*/provider(?:\s+(.*))?$", re.IGNORECASE)
 _MODEL_CMD = re.compile(r"^\s*/model(?:\s+(.+))?\s*$", re.IGNORECASE)
 
 
+def parse_provider_command(text: str):
+    """Parse a /provider command line into an action dict, or None when it is not a well-formed command.
+
+    Forms: /provider | /provider <name> [host] | /provider add <name> <host> [model] [keyenv=VAR]
+           | /provider remove <name>
+    """
+    match = _PROVIDER_CMD.match(text or "")
+    if not match:
+        return None
+    rest = (match.group(1) or "").strip()
+    if not rest:
+        return {"action": "status"}
+    tokens = rest.split()
+    head = tokens[0].lower()
+    if head == "add":
+        if len(tokens) < 3 or len(tokens) > 5:
+            return None
+        model, keyenv = None, None
+        for tok in tokens[3:]:
+            if tok.lower().startswith("keyenv="):
+                keyenv = tok.split("=", 1)[1] or None
+            elif model is None:
+                model = tok
+            else:
+                return None
+        return {"action": "add", "name": tokens[1], "host": tokens[2], "model": model, "api_key_env": keyenv}
+    if head in ("remove", "rm", "delete"):
+        if len(tokens) != 2:
+            return None
+        return {"action": "remove", "name": tokens[1]}
+    if len(tokens) <= 2:
+        return {"action": "switch", "name": tokens[0], "host": tokens[1] if len(tokens) == 2 else None}
+    return None
+
+
 def is_provider_command(text: str) -> bool:
-    """True only for '/provider' optionally followed by a provider name and a host, never for prose."""
-    return bool(_PROVIDER_CMD.match(text or ""))
+    """True only for a well-formed /provider command, never for prose."""
+    return parse_provider_command(text) is not None
 
 
 def is_model_command(text: str) -> bool:
@@ -227,16 +262,26 @@ def main() -> None:
             if user_input.lower() == "/models":
                 print(f"\n{format_model_list(discover_local_models())}")
                 continue
-            provider_match = _PROVIDER_CMD.match(user_input)
-            if provider_match:
-                if provider_match.group(1) is None:
+            provider_cmd = parse_provider_command(user_input)
+            if provider_cmd is not None:
+                if provider_cmd["action"] == "status":
                     _customs = sorted(load_custom_providers())
                     _custom_txt = f" Custom: {', '.join(_customs)}." if _customs else ""
                     print(f"\n{session.status()}\nProviders: ollama | openai | llama.cpp | lmstudio.{_custom_txt} "
-                          "Switch with /provider <name> [host], e.g. /provider lmstudio or /provider openai http://127.0.0.1:8000")
-                else:
-                    _ok, _msg = session.switch_provider(provider_match.group(1), provider_match.group(2))
+                          "Switch with /provider <name> [host], e.g. /provider lmstudio or /provider openai http://127.0.0.1:8000\n"
+                          "Define a custom provider here: /provider add <name> <host> [model] [keyenv=VAR]  |  "
+                          "remove one: /provider remove <name>")
+                elif provider_cmd["action"] == "switch":
+                    _ok, _msg = session.switch_provider(provider_cmd["name"], provider_cmd["host"])
                     engine.client = session.client
+                    print(f"\n{_msg}")
+                elif provider_cmd["action"] == "add":
+                    _ok, _msg = session.add_provider(provider_cmd["name"], provider_cmd["host"],
+                                                     provider_cmd["model"], provider_cmd["api_key_env"])
+                    engine.client = session.client
+                    print(f"\n{_msg}")
+                else:  # remove
+                    _ok, _msg = session.remove_provider(provider_cmd["name"])
                     print(f"\n{_msg}")
                 continue
             model_match = _MODEL_CMD.match(user_input)

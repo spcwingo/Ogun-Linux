@@ -483,6 +483,67 @@ def test_session_switch_to_custom_provider() -> None:
         assert ok and "Already using bigbox" in msg, msg
 
 
+def test_save_and_remove_custom_provider() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), \
+             patch.dict(os.environ, {"OGUN_CUSTOM_PROVIDERS": ""}):
+            ok, msg = providers.save_custom_provider("newbox", "http://10.0.0.5:8000/", model="m1", api_key_env="NB_KEY")
+            assert ok, msg
+            assert load_custom_providers()["newbox"] == {"host": "http://10.0.0.5:8000", "model": "m1", "api_key_env": "NB_KEY"}
+            ok, msg = providers.save_custom_provider("ollama", "http://x:1")
+            assert not ok and "built-in" in msg, msg
+            ok, _msg = providers.save_custom_provider("bad name", "http://x:1")
+            assert not ok
+            ok, msg = providers.save_custom_provider("okname", "localhost:8000")
+            assert not ok and "not a URL" in msg, msg
+            ok, msg = providers.remove_custom_provider("NEWBOX")   # case-insensitive
+            assert ok, msg
+            assert load_custom_providers() == {}
+            ok, _msg = providers.remove_custom_provider("ghost")
+            assert not ok
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"envbox": {"host": "http://10.0.0.6:8000"}})}
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), patch.dict(os.environ, env):
+            ok, msg = providers.remove_custom_provider("envbox")
+            assert not ok and "OGUN_CUSTOM_PROVIDERS" in msg, msg
+
+
+def test_session_add_and_remove_provider() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), \
+             patch.dict(os.environ, {"OGUN_CUSTOM_PROVIDERS": ""}), \
+             patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+            ok, msg = session.add_provider("newbox", "http://127.0.0.1:18080")
+            assert ok and session.label == "newbox" and session.provider == "openai", msg
+            assert providers.get_custom_provider("newbox") is not None
+            ok, msg = session.add_provider("deadbox", "http://127.0.0.1:1")
+            assert ok and "saved for next time" in msg and session.label == "newbox", msg
+            ok, msg = session.remove_provider("deadbox")
+            assert ok and providers.get_custom_provider("deadbox") is None, msg
+
+
+def test_parse_provider_command() -> None:
+    import main as ogun_main
+    parse = ogun_main.parse_provider_command
+    assert parse("/provider") == {"action": "status"}
+    assert parse("/provider lmstudio") == {"action": "switch", "name": "lmstudio", "host": None}
+    assert parse("/provider openai http://h:1")["host"] == "http://h:1"
+    add = parse("/provider add bigbox http://h:8000 qwen3-32b keyenv=BB_KEY")
+    assert add == {"action": "add", "name": "bigbox", "host": "http://h:8000",
+                   "model": "qwen3-32b", "api_key_env": "BB_KEY"}, add
+    assert parse("/provider add bigbox http://h:8000")["model"] is None
+    assert parse("/provider remove bigbox") == {"action": "remove", "name": "bigbox"}
+    assert parse("/provider add onlyname") is None
+    assert parse("/provider remove") is None
+    assert parse("/provider a b c") is None
+    assert parse("what is a /provider") is None
+
+
 def main() -> int:
     tests = [
         test_normalize_provider,
@@ -506,6 +567,9 @@ def main() -> int:
         test_resolve_provider_target,
         test_api_key_header_sent,
         test_session_switch_to_custom_provider,
+        test_save_and_remove_custom_provider,
+        test_session_add_and_remove_provider,
+        test_parse_provider_command,
     ]
     for t in tests:
         t()

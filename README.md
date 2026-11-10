@@ -153,6 +153,8 @@ Ollama is the default, but Ogun can chat with models served by the other local t
 | `/provider lmstudio` | switch to LM Studio (default http://127.0.0.1:1234) |
 | `/provider openai http://127.0.0.1:8000` | switch to any OpenAI-compatible server (llama-server, vLLM, HF TGI, Unsloth Studio, ...) |
 | `/provider ollama` | switch back to Ollama |
+| `/provider add bigbox http://192.168.1.50:8000 qwen3-32b` | define a custom provider **from inside chat**: saved to `config/providers.json`, then switched to (add `keyenv=VAR` to name an env var holding its API key) |
+| `/provider remove bigbox` | delete a saved custom provider |
 | `/model llama3.1:8b` | switch model: an Ollama tag, the id a server is serving, or a path to a `.gguf` file |
 | `/model ~/models/my-finetune-Q4_K_M.gguf` | run a GGUF directly: Ogun launches `llama-server` for it (provider `llama.cpp`) or imports it into Ollama (provider `ollama`) |
 
@@ -167,7 +169,7 @@ A failed switch (server down, model not loaded there) changes nothing — the cu
 OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environment
 ```
 
-**Custom endpoints.** Any OpenAI-compatible base URL works ad hoc via `--host` / `OGUN_LLM_HOST` / `/provider openai <url>` — including a path prefix, e.g. `http://myserver:9000/llm`. To give an endpoint a reusable name, define it once in `config/providers.json`:
+**Custom endpoints.** Any OpenAI-compatible base URL works ad hoc via `--host` / `OGUN_LLM_HOST` / `/provider openai <url>` — including a path prefix, e.g. `http://myserver:9000/llm`. To give an endpoint a reusable name, define it once in `config/providers.json` — or right from the chat prompt with `/provider add bigbox http://192.168.1.50:8000 qwen3-32b`, which saves the same file and switches to it (`/provider remove bigbox` deletes it again; `keyenv=VAR` adds a key reference):
 
 ```json
 {

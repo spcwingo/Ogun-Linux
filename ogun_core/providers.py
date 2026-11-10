@@ -624,6 +624,74 @@ def get_custom_provider(name: Optional[str]) -> Optional[Dict[str, Any]]:
     return load_custom_providers().get(str(name).strip().lower())
 
 
+def _read_custom_providers_file() -> Dict[str, Any]:
+    """The raw contents of config/providers.json ({} when missing/malformed). File only, no env."""
+    try:
+        if CUSTOM_PROVIDERS_PATH.is_file():
+            data = json.loads(CUSTOM_PROVIDERS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _write_custom_providers_file(data: Dict[str, Any]) -> None:
+    CUSTOM_PROVIDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CUSTOM_PROVIDERS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def validate_custom_provider(name: str, host: str) -> Optional[str]:
+    """An error string when a custom provider name/host is unusable, else None."""
+    cleaned = str(name or "").strip()
+    if not cleaned or any(ch.isspace() for ch in cleaned) or "/" in cleaned or "\\" in cleaned:
+        return f"'{name}' is not a usable provider name (one word, no slashes)."
+    if normalize_provider(cleaned) is not None:
+        return f"'{cleaned}' is a built-in provider name; pick a different name."
+    if not str(host or "").strip().lower().startswith(("http://", "https://")):
+        return f"'{host}' is not a URL (it must start with http:// or https://)."
+    return None
+
+
+def save_custom_provider(name: str, host: str, model: Optional[str] = None,
+                         api_key_env: Optional[str] = None) -> Tuple[bool, str]:
+    """Define (or overwrite) a custom provider in config/providers.json. Never raises."""
+    error = validate_custom_provider(name, host)
+    if error:
+        return False, error
+    definition: Dict[str, Any] = {"host": str(host).strip().rstrip("/")}
+    if model:
+        definition["model"] = str(model).strip()
+    if api_key_env:
+        definition["api_key_env"] = str(api_key_env).strip()
+    try:
+        data = _read_custom_providers_file()
+        data[str(name).strip()] = definition
+        _write_custom_providers_file(data)
+    except Exception as exc:
+        return False, f"Could not save the provider to {CUSTOM_PROVIDERS_PATH} ({exc})."
+    return True, f"Saved custom provider '{str(name).strip()}' ({definition['host']}) to {CUSTOM_PROVIDERS_PATH}."
+
+
+def remove_custom_provider(name: str) -> Tuple[bool, str]:
+    """Remove a custom provider from config/providers.json. Env-defined ones cannot be removed
+    here (they live in $OGUN_CUSTOM_PROVIDERS). Never raises."""
+    key = str(name or "").strip()
+    data = _read_custom_providers_file()
+    file_key = next((k for k in data if k.strip().lower() == key.lower()), None)
+    if file_key is None:
+        if get_custom_provider(key) is not None:
+            return False, (f"'{key}' is defined by $OGUN_CUSTOM_PROVIDERS, not in {CUSTOM_PROVIDERS_PATH}; "
+                           "change the environment variable to remove it.")
+        return False, f"No custom provider named '{key}'."
+    try:
+        del data[file_key]
+        _write_custom_providers_file(data)
+    except Exception as exc:
+        return False, f"Could not update {CUSTOM_PROVIDERS_PATH} ({exc})."
+    return True, f"Removed custom provider '{file_key}'."
+
+
 def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Resolve a provider name (built-in OR custom) to everything needed to build its client:
 
@@ -808,6 +876,24 @@ class ProviderSession:
             if not ok_g:
                 result += " (The GGUF could not be imported; pick another /model.)"
         return True, result
+
+    def add_provider(self, name: str, host: str, model: Optional[str] = None,
+                     api_key_env: Optional[str] = None) -> Tuple[bool, str]:
+        """Define a custom provider from inside chat (/provider add): save it to
+        config/providers.json, then switch to it. An unreachable endpoint is still saved;
+        the session just stays on the current provider. (ok, message); never raises."""
+        ok, msg = save_custom_provider(name, host, model=model, api_key_env=api_key_env)
+        if not ok:
+            return False, msg
+        switched, switch_msg = self.switch_provider(str(name).strip())
+        if switched:
+            return True, f"{msg} {switch_msg}"
+        return True, f"{msg} It is saved for next time, but could not be used right now: {switch_msg}"
+
+    def remove_provider(self, name: str) -> Tuple[bool, str]:
+        """/provider remove: delete a saved custom provider. The active session is untouched
+        even when the removed provider is the one in use (it just stops being defined)."""
+        return remove_custom_provider(name)
 
     def switch_model(self, value: str) -> Tuple[bool, str]:
         """Switch model within the current provider. Accepts a model tag/id or a .gguf path.
