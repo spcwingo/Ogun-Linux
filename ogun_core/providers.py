@@ -97,6 +97,41 @@ def _map_openai_options(options: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _http_error_detail(exc: urllib.error.HTTPError, limit: int = 600) -> str:
+    """Best-effort extraction of a server's own error text from an HTTP error body.
+
+    OpenAI-style servers answer errors with {"error": {"message": ...}} and FastAPI apps
+    with {"detail": ...}; either says far more than urllib's bare 'HTTP Error 500'.
+    Returns '' when the body carries nothing readable. Never raises.
+    """
+    try:
+        raw = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    detail = ""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            detail = str(err.get("message") or err.get("detail") or "")
+        elif isinstance(err, str):
+            detail = err
+        if not detail and data.get("detail") is not None:
+            d = data["detail"]
+            detail = d if isinstance(d, str) else json.dumps(d)
+        if not detail and data.get("message"):
+            detail = str(data["message"])
+    if not detail:
+        detail = raw
+    detail = " ".join(detail.split())
+    return detail[:limit]
+
+
 class OpenAICompatClient:
     """Client for any OpenAI-compatible chat server, with OllamaClient's interface.
 
@@ -165,7 +200,9 @@ class OpenAICompatClient:
                     "or save this endpoint as a custom provider whose keyenv names the key's env var "
                     "(/provider add <name> <host> [model] key=<api-key>, or keyenv=<VAR> naming the key's env var).",
                 )
-            return False, f"{self.label} at {self.host} returned HTTP {exc.code}."
+            detail = _http_error_detail(exc)
+            return False, f"{self.label} at {self.host} returned HTTP {exc.code}." + (
+                f" Server said: {detail}" if detail else "")
         except Exception as exc:
             return (
                 False,
@@ -180,6 +217,14 @@ class OpenAICompatClient:
             "model": self.model,
             "detail": f"{self.label} manages its own model memory; unload the model in that app to free the GPU.",
         }
+
+    def _http_failure(self, exc: urllib.error.HTTPError) -> RuntimeError:
+        """Turn a bare HTTPError into an error that carries the server's own explanation."""
+        detail = _http_error_detail(exc)
+        msg = f"HTTP {exc.code} {exc.reason} from {self.label} at {self.host}"
+        if detail:
+            msg += f" — server said: {detail}"
+        return RuntimeError(msg)
 
     # -- Chat --------------------------------------------------------------
     def chat(
@@ -204,6 +249,8 @@ class OpenAICompatClient:
             return self._chat_stream(payload, eff_timeout, on_token)
         try:
             data = self._request_json("/v1/chat/completions", payload, timeout=eff_timeout)
+        except urllib.error.HTTPError as he:
+            raise self._http_failure(he) from he
         except urllib.error.URLError as ue:
             if "timed out" in str(ue).lower():
                 raise TimeoutError(str(ue))
@@ -258,6 +305,8 @@ class OpenAICompatClient:
                             slot["function"]["arguments"] += fn["arguments"]
                         if tc.get("id"):
                             slot["id"] = tc["id"]
+        except urllib.error.HTTPError as he:
+            raise self._http_failure(he) from he
         except urllib.error.URLError as ue:
             if "timed out" in str(ue).lower():
                 raise TimeoutError(str(ue))

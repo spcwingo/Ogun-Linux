@@ -487,6 +487,55 @@ def test_check_connection_401_names_the_key_problem() -> None:
     assert not ok and "the key it was given was rejected" in msg, msg
 
 
+def test_http_error_body_is_surfaced() -> None:
+    import urllib.error
+
+    def raising(body: bytes, code: int = 500, reason: str = "Internal Server Error"):
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, reason, {}, io.BytesIO(body))
+        return fake
+
+    # detail extraction variants
+    from ogun_core.providers import _http_error_detail
+
+    def err(body: bytes):
+        return urllib.error.HTTPError("http://x", 500, "ISE", {}, io.BytesIO(body))
+
+    assert _http_error_detail(err(b'{"detail": "no route for model"}')) == "no route for model"
+    assert _http_error_detail(err(b'{"error": {"message": "upstream down"}}')) == "upstream down"
+    assert _http_error_detail(err(b'{"error": "plain string error"}')) == "plain string error"
+    assert _http_error_detail(err(b'raw text boom')) == "raw text boom"
+    assert _http_error_detail(err(b'')) == ""
+
+    client = OpenAICompatClient(host="http://127.0.0.1:4000", model="v4.1flash", label="deeperseeker")
+    body = json.dumps({"detail": "backend exploded: upstream key missing"}).encode()
+    # non-streaming chat
+    with patch("ogun_core.providers.urllib.request.urlopen", raising(body)):
+        try:
+            client.chat([{"role": "user", "content": "hi"}])
+            raise AssertionError("chat should have raised")
+        except RuntimeError as exc:
+            assert "HTTP 500" in str(exc) and "upstream key missing" in str(exc), exc
+    # streaming chat
+    with patch("ogun_core.providers.urllib.request.urlopen", raising(body)):
+        try:
+            client.chat([{"role": "user", "content": "hi"}], on_token=lambda t: None)
+            raise AssertionError("streaming chat should have raised")
+        except RuntimeError as exc:
+            assert "upstream key missing" in str(exc), exc
+    # connection check shows the detail too
+    with patch("ogun_core.providers.urllib.request.urlopen", raising(body)):
+        ok, msg = client.check_connection()
+    assert not ok and "HTTP 500" in msg and "upstream key missing" in msg, msg
+    # a body-less error still produces the plain status message
+    with patch("ogun_core.providers.urllib.request.urlopen", raising(b"")):
+        try:
+            client.chat([{"role": "user", "content": "hi"}])
+            raise AssertionError("chat should have raised")
+        except RuntimeError as exc:
+            assert "HTTP 500" in str(exc) and "server said" not in str(exc), exc
+
+
 def test_session_switch_to_custom_provider() -> None:
     env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"bigbox": {"host": "http://127.0.0.1:18080"}})}
     session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
@@ -743,6 +792,7 @@ def main() -> int:
         test_resolve_provider_target,
         test_api_key_header_sent,
         test_check_connection_401_names_the_key_problem,
+        test_http_error_body_is_surfaced,
         test_session_switch_to_custom_provider,
         test_literal_api_key_support,
         test_unset_keyenv_is_surfaced,
