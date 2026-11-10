@@ -32,8 +32,10 @@ from ogun_core.providers import (
     format_model_list,
     gguf_model_name,
     import_gguf_into_ollama,
+    load_custom_providers,
     normalize_provider,
     resolve_provider_host,
+    resolve_provider_target,
 )
 from ogun_core.engine import CoreEngine, OllamaClient
 
@@ -401,6 +403,86 @@ def test_main_switch_command_matchers() -> None:
     assert not ogun_main.is_provider_command("use /provider please")
 
 
+# ---------------------------------------------------------------------------
+# Custom named providers + API keys
+# ---------------------------------------------------------------------------
+def test_load_custom_providers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        cfg.write_text(json.dumps({
+            "filebox": {"host": "http://10.0.0.1:8000"},
+            "shared": {"host": "http://10.0.0.2:8000"},
+            "broken": {"model": "no-host-here"},
+        }), encoding="utf-8")
+        env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
+            "envbox": {"host": "http://10.0.0.3:9000", "model": "m1"},
+            "shared": {"host": "http://10.0.0.9:8000"},
+        })}
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), patch.dict(os.environ, env):
+            customs = load_custom_providers()
+    assert customs["filebox"]["host"] == "http://10.0.0.1:8000"
+    assert customs["envbox"]["model"] == "m1"
+    assert customs["shared"]["host"] == "http://10.0.0.9:8000", "environment must win per name"
+    assert "broken" not in customs, "definitions without a host are dropped"
+
+    with patch.object(providers, "CUSTOM_PROVIDERS_PATH", Path("/nonexistent/providers.json")), \
+         patch.dict(os.environ, {"OGUN_CUSTOM_PROVIDERS": "not json{"}):
+        assert load_custom_providers() == {}, "malformed sources contribute nothing, never raise"
+
+
+def test_resolve_provider_target() -> None:
+    env = {
+        "OGUN_CUSTOM_PROVIDERS": json.dumps({
+            "bigbox": {"host": "http://192.168.1.50:8000/", "model": "qwen3-32b", "api_key_env": "BIGBOX_KEY"},
+        }),
+        "BIGBOX_KEY": "sekret",
+        "OGUN_LLM_API_KEY": "generic-key",
+    }
+    with patch.dict(os.environ, env):
+        target = resolve_provider_target("BigBox")
+        assert target["kind"] == "openai" and target["display"] == "BigBox"
+        assert target["host"] == "http://192.168.1.50:8000" and target["model"] == "qwen3-32b"
+        assert target["api_key"] == "sekret"
+        assert resolve_provider_target("bigbox", "http://other:1")["host"] == "http://other:1"
+        assert resolve_provider_target("nope") is None
+        builtin = resolve_provider_target("openai")
+        assert builtin["kind"] == "openai" and builtin["api_key"] == "generic-key"
+        ollama_t = resolve_provider_target("ollama")
+        assert ollama_t["kind"] == "ollama" and ollama_t["api_key"] is None
+
+
+def test_api_key_header_sent() -> None:
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["auth"] = req.headers.get("Authorization")
+        return _json_resp({"choices": [{"message": {"content": "ok", "tool_calls": []}}]})
+
+    client = OpenAICompatClient(host="http://127.0.0.1:8000", model="m", api_key="key-123")
+    with patch("ogun_core.providers.urllib.request.urlopen", fake_urlopen):
+        assert client.chat([{"role": "user", "content": "hi"}])["content"] == "ok"
+    assert captured["auth"] == "Bearer key-123", captured
+
+    captured.clear()
+    plain = OpenAICompatClient(host="http://127.0.0.1:8000", model="m")
+    with patch("ogun_core.providers.urllib.request.urlopen", fake_urlopen):
+        plain.chat([{"role": "user", "content": "hi"}])
+    assert captured["auth"] is None, "no key configured -> no Authorization header"
+
+
+def test_session_switch_to_custom_provider() -> None:
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"bigbox": {"host": "http://127.0.0.1:18080"}})}
+    session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+    with patch.dict(os.environ, env), \
+         patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+        ok, msg = session.switch_provider("bigbox")
+        assert ok and session.provider == "openai", msg
+        assert session.label == "bigbox" and "bigbox" in session.status()
+        assert session.model == "srv-1", session.model  # adopted from the server
+        ok, msg = session.switch_provider("bigbox")
+        assert ok and "Already using bigbox" in msg, msg
+
+
 def main() -> int:
     tests = [
         test_normalize_provider,
@@ -420,6 +502,10 @@ def main() -> int:
         test_session_gguf_switch_llamacpp,
         test_session_gguf_switch_ollama_import,
         test_main_switch_command_matchers,
+        test_load_custom_providers,
+        test_resolve_provider_target,
+        test_api_key_header_sent,
+        test_session_switch_to_custom_provider,
     ]
     for t in tests:
         t()

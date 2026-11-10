@@ -167,6 +167,16 @@ A failed switch (server down, model not loaded there) changes nothing — the cu
 OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environment
 ```
 
+**Custom endpoints.** Any OpenAI-compatible base URL works ad hoc via `--host` / `OGUN_LLM_HOST` / `/provider openai <url>` — including a path prefix, e.g. `http://myserver:9000/llm`. To give an endpoint a reusable name, define it once in `config/providers.json`:
+
+```json
+{
+  "bigbox": {"host": "http://192.168.1.50:8000", "model": "qwen3-32b", "api_key_env": "BIGBOX_API_KEY"}
+}
+```
+
+Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, `api_key_env` names the environment variable holding it (keys are never stored in the file); for the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
+
 Notes:
 
 - With an external server and no `--model`, Ogun uses the model that server reports as loaded.
@@ -247,6 +257,8 @@ All optional. Set them as environment variables before running `./run_ogun.sh`.
 | `OGUN_PROVIDER` | `ollama` | inference provider: `ollama`, `openai`, `llama.cpp` or `lmstudio` |
 | `OGUN_LLM_HOST` | - | base URL for non-Ollama providers (overridden by `--host`) |
 | `OGUN_MODEL_DIRS` | - | extra folders to scan for GGUF/HF models (`:`-separated), on top of `~/models`, the Hugging Face cache, LM Studio's folder and `training/data/exports` |
+| `OGUN_CUSTOM_PROVIDERS` | - | custom named providers as a JSON object (`{"name": {"host": ..., "model": ..., "api_key_env": ...}}`); same format as `config/providers.json`, wins per name |
+| `OGUN_LLM_API_KEY` | - | Bearer key sent to the `openai` provider's server (most local servers don't need one) |
 | `OGUN_VRAM_PROFILE` | `shared` | `max`, `shared` or `cpu` at start-up |
 | `OGUN_NUM_GPU` | - | custom layer count (`12`), or `auto` to let Ollama decide; overrides the profile |
 | `OGUN_KEEP_ALIVE` | `2m` | how long an idle model stays loaded |

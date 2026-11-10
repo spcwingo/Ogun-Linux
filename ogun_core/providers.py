@@ -110,15 +110,23 @@ class OpenAICompatClient:
         model: str = MODEL_NAME,
         timeout: Optional[float] = None,
         label: Optional[str] = None,
+        api_key: Optional[str] = None,
     ) -> None:
         self.host = host.rstrip("/")
         self.model = model
         self.label = label or "OpenAI-compatible server"
+        self.api_key = api_key or None
         self._custom_timeout = timeout is not None
         self.timeout = timeout if self._custom_timeout else get_request_timeout()
 
     def get_effective_timeout(self) -> float:
         return self.timeout if self._custom_timeout else get_request_timeout()
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     # -- HTTP helpers ------------------------------------------------------
     def _request_json(self, path: str, payload: Optional[Dict[str, Any]] = None,
@@ -127,7 +135,7 @@ class OpenAICompatClient:
         req = urllib.request.Request(
             f"{self.host}{path}",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
             method="POST" if data is not None else "GET",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -201,7 +209,7 @@ class OpenAICompatClient:
         req = urllib.request.Request(
             f"{self.host}/v1/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
             method="POST",
         )
         parts: List[str] = []
@@ -541,7 +549,8 @@ def format_model_list(entries: List[Dict[str, Any]]) -> str:
 # Client factory
 # ---------------------------------------------------------------------------
 def create_client(provider: str, model: str = MODEL_NAME, host: Optional[str] = None,
-                  timeout: Optional[float] = None):
+                  timeout: Optional[float] = None, api_key: Optional[str] = None,
+                  label: Optional[str] = None):
     """Build the chat client for a canonical provider key (see normalize_provider).
 
     Returns an object with OllamaClient's interface. For 'ollama' this is engine.OllamaClient.
@@ -549,9 +558,10 @@ def create_client(provider: str, model: str = MODEL_NAME, host: Optional[str] = 
     if provider == "ollama":
         from ogun_core.engine import OllamaClient
         return OllamaClient(host=host or OLLAMA_HOST, model=model, timeout=timeout)
-    label = PROVIDER_LABELS.get(provider, "OpenAI-compatible server")
     base = host or PROVIDER_DEFAULT_HOSTS.get(provider, PROVIDER_DEFAULT_HOSTS["openai"])
-    return OpenAICompatClient(host=base, model=model, timeout=timeout, label=label)
+    return OpenAICompatClient(host=base, model=model, timeout=timeout,
+                              label=label or PROVIDER_LABELS.get(provider, "OpenAI-compatible server"),
+                              api_key=api_key)
 
 
 def resolve_provider_host(provider: str, host: Optional[str]) -> str:
@@ -564,6 +574,85 @@ def resolve_provider_host(provider: str, host: Optional[str]) -> str:
     if provider == "ollama":
         return OLLAMA_HOST
     return PROVIDER_DEFAULT_HOSTS.get(provider, PROVIDER_DEFAULT_HOSTS["openai"])
+
+
+# ---------------------------------------------------------------------------
+# Custom named providers (user-defined endpoints)
+# ---------------------------------------------------------------------------
+#: User-defined providers live here (same folder as the saved hardware profile; user-local, not in git).
+CUSTOM_PROVIDERS_PATH = OGUN_ROOT / "config" / "providers.json"
+
+
+def load_custom_providers() -> Dict[str, Dict[str, Any]]:
+    """User-defined named providers, merged from config/providers.json and $OGUN_CUSTOM_PROVIDERS
+    (a JSON object; the environment wins per name). Each definition:
+
+        {"host": "http://192.168.1.50:8000",          # required
+         "model": "qwen3-32b",                        # optional default model
+         "api_key_env": "MY_SERVER_KEY"}              # optional: env var holding a Bearer key
+
+    Keys are the provider names as typed (matched case-insensitively). Never raises: a malformed
+    file or variable simply contributes nothing.
+    """
+    merged: Dict[str, Dict[str, Any]] = {}
+    try:
+        if CUSTOM_PROVIDERS_PATH.is_file():
+            data = json.loads(CUSTOM_PROVIDERS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                merged.update(data)
+    except Exception:
+        pass
+    raw = os.environ.get("OGUN_CUSTOM_PROVIDERS", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                merged.update(data)
+        except Exception:
+            pass
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, definition in merged.items():
+        if isinstance(definition, dict) and definition.get("host"):
+            out[str(name).strip().lower()] = definition
+    return out
+
+
+def get_custom_provider(name: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The custom provider definition for a name, or None."""
+    if not name:
+        return None
+    return load_custom_providers().get(str(name).strip().lower())
+
+
+def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve a provider name (built-in OR custom) to everything needed to build its client:
+
+    {"kind": canonical built-in kind, "host": base URL, "model": default model or None,
+     "api_key": Bearer key or None, "display": name to show the user}
+
+    Returns None for an unknown name. An explicit new_host always wins; a custom provider's
+    host comes from its definition; $OGUN_LLM_HOST and presets fill the rest.
+    """
+    if not name:
+        return None
+    kind = normalize_provider(name)
+    if kind is not None:
+        api_key = os.environ.get("OGUN_LLM_API_KEY") or None
+        return {"kind": kind, "host": resolve_provider_host(kind, new_host),
+                "model": None, "api_key": api_key if kind != "ollama" else None,
+                "display": PROVIDER_LABELS.get(kind, kind)}
+    definition = get_custom_provider(name)
+    if definition is None:
+        return None
+    api_key = None
+    key_env = definition.get("api_key_env")
+    if key_env:
+        api_key = os.environ.get(str(key_env)) or None
+    if not api_key and definition.get("api_key"):
+        api_key = str(definition["api_key"])
+    return {"kind": "openai", "host": (new_host or str(definition["host"])).rstrip("/"),
+            "model": definition.get("model"), "api_key": api_key,
+            "display": str(name).strip()}
 
 
 def _ollama_model_names(host: str) -> List[str]:
@@ -589,17 +678,21 @@ class ProviderSession:
     being left behind.
     """
 
-    def __init__(self, provider: str, host: str, model: str, timeout: Optional[float] = None) -> None:
+    def __init__(self, provider: str, host: str, model: str, timeout: Optional[float] = None,
+                 name: Optional[str] = None, api_key: Optional[str] = None) -> None:
         self.provider = provider
         self.host = host.rstrip("/")
         self.model = model
+        self.name = name            # display name (a custom provider's name, or a built-in's label)
+        self.api_key = api_key
         self.llama_server: Optional[LlamaCppServer] = None
-        self.client = create_client(provider, model=model, host=self.host, timeout=timeout)
+        self.client = create_client(provider, model=model, host=self.host, timeout=timeout,
+                                    api_key=api_key, label=name)
 
     # -- helpers -----------------------------------------------------------
     @property
     def label(self) -> str:
-        return PROVIDER_LABELS.get(self.provider, self.provider)
+        return self.name or PROVIDER_LABELS.get(self.provider, self.provider)
 
     def status(self) -> str:
         lines = [f"Provider: {self.label} at {self.host}", f"Model: {self.model}"]
@@ -669,23 +762,29 @@ class ProviderSession:
 
     # -- Switches ------------------------------------------------------------
     def switch_provider(self, name: str, new_host: Optional[str] = None) -> Tuple[bool, str]:
-        """Switch provider (and optionally host) without restarting. (ok, message); never raises."""
-        target = normalize_provider(name)
+        """Switch provider (built-in or custom name, optionally a new host) without restarting.
+        (ok, message); never raises."""
+        target = resolve_provider_target(name, new_host)
         if target is None:
-            return False, f"Unknown provider '{name}'. Use one of: ollama, openai, llama.cpp, lmstudio."
-        if target == self.provider and not new_host:
+            customs = ", ".join(sorted(load_custom_providers())) or "none defined"
+            return False, (f"Unknown provider '{name}'. Built-ins: ollama, openai, llama.cpp, lmstudio. "
+                           f"Custom providers: {customs}.")
+        kind = target["kind"]
+        if kind == self.provider and target["display"] == self.label and not new_host:
             return True, f"Already using {self.label} at {self.host} with model '{self.model}'."
-        host = resolve_provider_host(target, new_host)
+        host = target["host"]
+        model = target["model"] or self.model
 
         server: Optional[LlamaCppServer] = None
         gguf = Path(self.model).expanduser() if str(self.model).lower().endswith(".gguf") else None
-        if target == "llama.cpp" and gguf is not None and gguf.is_file():
+        if kind == "llama.cpp" and gguf is not None and gguf.is_file():
             server = LlamaCppServer(host=host)
             ok, detail = server.start(gguf)
             if not ok:
                 return False, f"{detail} (Still using {self.label}.)"
 
-        candidate = create_client(target, model=self.model, host=host)
+        candidate = create_client(kind, model=model, host=host,
+                                  api_key=target["api_key"], label=target["display"])
         ok_conn, msg = candidate.check_connection()
         if not ok_conn:
             if server is not None:
@@ -693,14 +792,17 @@ class ProviderSession:
             return False, f"{msg} (Still using {self.label}.)"
 
         # Commit: leave the old target cleanly, then swap.
-        if self.provider == "ollama" and target != "ollama":
+        if self.provider == "ollama" and kind != "ollama":
             self._unload_current_ollama_model()
         self.stop_managed_server()
-        self.provider, self.host, self.client = target, host, candidate
+        self.provider, self.host, self.client = kind, host, candidate
+        self.name, self.api_key = target["display"], target["api_key"]
+        if target["model"]:
+            self.model = str(target["model"])
         self.llama_server = server
         note = self.adopt_served_model()
         result = f"Switched to {self.label} at {host}, model '{self.model}'.{note}"
-        if target == "ollama" and gguf is not None and gguf.is_file():
+        if kind == "ollama" and gguf is not None and gguf.is_file():
             ok_g, detail = self.activate_gguf(gguf)
             result += f" {detail}"
             if not ok_g:

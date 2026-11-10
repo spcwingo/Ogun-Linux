@@ -15,12 +15,11 @@ from ogun_core.paths import init_user_workspace
 from ogun_core.plugin_builder import build_plugin_staged, parse_code_blocks
 from ogun_core.plugin_manager import PluginManager
 from ogun_core.providers import (
-    PROVIDER_LABELS,
     ProviderSession,
     discover_local_models,
     format_model_list,
-    normalize_provider,
-    resolve_provider_host,
+    load_custom_providers,
+    resolve_provider_target,
 )
 
 
@@ -57,9 +56,10 @@ def main() -> None:
                         "With a non-Ollama provider this is the server's model id; a path to a .gguf file works "
                         "with --provider llama.cpp (Ogun launches llama-server) or --provider ollama (auto-import).")
     parser.add_argument("--provider", type=str, default=None,
-                        help="Inference provider: ollama (default) | openai | llama.cpp | lmstudio. "
-                             "Can also be set with $OGUN_PROVIDER. 'openai' means any OpenAI-compatible local "
-                             "server (llama-server, vLLM, HF TGI, Unsloth Studio, ...).")
+                        help="Inference provider: ollama (default) | openai | llama.cpp | lmstudio, or a custom "
+                             "provider defined in config/providers.json or $OGUN_CUSTOM_PROVIDERS. Can also be "
+                             "set with $OGUN_PROVIDER. 'openai' means any OpenAI-compatible local server "
+                             "(llama-server, vLLM, HF TGI, Unsloth Studio, ...).")
     parser.add_argument("--host", type=str, default=None,
                         help="Base URL of the inference server (default: the provider's usual local address, "
                              "or $OGUN_LLM_HOST). For Ollama this overrides $OLLAMA_HOST.")
@@ -77,12 +77,16 @@ def main() -> None:
     args.model_explicit = args.model            # only a model typed on the command line is exempt from the 'does it fit' check
     args.model = args.model or MODEL_NAME
 
-    provider = normalize_provider(args.provider or LLM_PROVIDER)
-    if provider is None:
-        print(f"[ERROR] Unknown provider '{args.provider or LLM_PROVIDER}'. Use ollama, openai, llama.cpp or lmstudio.",
+    provider_target = resolve_provider_target(args.provider or LLM_PROVIDER, args.host)
+    if provider_target is None:
+        print(f"[ERROR] Unknown provider '{args.provider or LLM_PROVIDER}'. Use ollama, openai, llama.cpp or lmstudio, "
+              "or a custom provider defined in config/providers.json or $OGUN_CUSTOM_PROVIDERS.",
               file=sys.stderr)
         sys.exit(2)
-    host = resolve_provider_host(provider, args.host)
+    provider = provider_target["kind"]
+    host = provider_target["host"]
+    if provider_target["model"] and not args.model_explicit:
+        args.model = str(provider_target["model"])
 
     # --list-models is read-only discovery: no connection check, no workspace setup.
     if args.list_models:
@@ -117,11 +121,12 @@ def main() -> None:
         if tuned and tuned.get("model_tag") and tuned["model_tag"] != args.model:
             args.model = tuned["model_tag"]
     else:
-        print(f"[*] Provider: {PROVIDER_LABELS[provider]} at {host}")
+        print(f"[*] Provider: {provider_target['display']} at {host}")
 
     # The live session: provider + host + model + client, switchable mid-chat with /provider and /model.
     from pathlib import Path as _Path
-    session = ProviderSession(provider, host, args.model)
+    session = ProviderSession(provider, host, args.model,
+                              name=provider_target["display"], api_key=provider_target["api_key"])
 
     # A .gguf file as --model: import it into Ollama, or serve it with a llama-server Ogun launches.
     model_path = None
@@ -225,7 +230,9 @@ def main() -> None:
             provider_match = _PROVIDER_CMD.match(user_input)
             if provider_match:
                 if provider_match.group(1) is None:
-                    print(f"\n{session.status()}\nProviders: ollama | openai | llama.cpp | lmstudio. "
+                    _customs = sorted(load_custom_providers())
+                    _custom_txt = f" Custom: {', '.join(_customs)}." if _customs else ""
+                    print(f"\n{session.status()}\nProviders: ollama | openai | llama.cpp | lmstudio.{_custom_txt} "
                           "Switch with /provider <name> [host], e.g. /provider lmstudio or /provider openai http://127.0.0.1:8000")
                 else:
                     _ok, _msg = session.switch_provider(provider_match.group(1), provider_match.group(2))
