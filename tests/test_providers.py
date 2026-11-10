@@ -470,6 +470,23 @@ def test_api_key_header_sent() -> None:
     assert captured["auth"] is None, "no key configured -> no Authorization header"
 
 
+def test_check_connection_401_names_the_key_problem() -> None:
+    import urllib.error
+
+    def unauthorized(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+    bare = OpenAICompatClient(host="http://127.0.0.1:4000", model="m", label="deeperseeker")
+    with patch("ogun_core.providers.urllib.request.urlopen", unauthorized):
+        ok, msg = bare.check_connection()
+    assert not ok and "401" in msg and "no API key was given" in msg and "OGUN_LLM_API_KEY" in msg, msg
+
+    keyed = OpenAICompatClient(host="http://127.0.0.1:4000", model="m", api_key="wrong-key")
+    with patch("ogun_core.providers.urllib.request.urlopen", unauthorized):
+        ok, msg = keyed.check_connection()
+    assert not ok and "the key it was given was rejected" in msg, msg
+
+
 def test_session_switch_to_custom_provider() -> None:
     env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"bigbox": {"host": "http://127.0.0.1:18080"}})}
     session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
@@ -481,6 +498,34 @@ def test_session_switch_to_custom_provider() -> None:
         assert session.model == "srv-1", session.model  # adopted from the server
         ok, msg = session.switch_provider("bigbox")
         assert ok and "Already using bigbox" in msg, msg
+
+
+def test_unset_keyenv_is_surfaced() -> None:
+    os.environ.pop("DEFINITELY_UNSET_VAR_XYZ", None)
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
+        "warnbox": {"host": "http://127.0.0.1:18080", "api_key_env": "DEFINITELY_UNSET_VAR_XYZ"},
+        "deadbox": {"host": "http://127.0.0.1:1", "api_key_env": "DEFINITELY_UNSET_VAR_XYZ"},
+    })}
+    with patch.dict(os.environ, env):
+        target = resolve_provider_target("warnbox")
+        assert target["key_env"] == "DEFINITELY_UNSET_VAR_XYZ" and target["api_key"] is None
+        listing = providers.provider_listing()
+        assert "keyenv=DEFINITELY_UNSET_VAR_XYZ (NOT SET)" in listing, listing
+
+    session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+    with patch.dict(os.environ, env), \
+         patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+        ok, msg = session.switch_provider("warnbox")
+        assert ok and "no API key was sent" in msg and "not the key itself" in msg, msg
+        ok, msg = session.switch_provider("deadbox")
+        assert not ok and "no API key was sent" in msg, msg
+
+    # and when the variable IS set, there is no warning and the key resolves
+    env_set = dict(env, DEFINITELY_UNSET_VAR_XYZ="the-key")
+    with patch.dict(os.environ, env_set):
+        target = resolve_provider_target("warnbox")
+        assert target["api_key"] == "the-key"
+        assert "(NOT SET)" not in providers.provider_listing()
 
 
 def test_save_and_remove_custom_provider() -> None:
@@ -641,7 +686,9 @@ def main() -> int:
         test_load_custom_providers,
         test_resolve_provider_target,
         test_api_key_header_sent,
+        test_check_connection_401_names_the_key_problem,
         test_session_switch_to_custom_provider,
+        test_unset_keyenv_is_surfaced,
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,
         test_parse_provider_command,

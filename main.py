@@ -149,6 +149,10 @@ def main() -> None:
     host = provider_target["host"]
     if provider_target["model"] and not args.model_explicit:
         args.model = str(provider_target["model"])
+    if provider_target.get("key_env") and not provider_target.get("api_key"):
+        print(f"[*] Note: provider '{provider_target['display']}' takes its API key from "
+              f"${provider_target['key_env']}, which is not set in this environment, so no key will be sent. "
+              "(keyenv names an environment variable; it is not the key itself.)")
 
     # --list-models is read-only discovery: no connection check, no workspace setup.
     if args.list_models:

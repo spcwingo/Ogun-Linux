@@ -180,7 +180,7 @@ OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environme
 }
 ```
 
-Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, `api_key_env` names the environment variable holding it (keys are never stored in the file); for the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
+Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, `api_key_env` names the environment variable holding it — the variable's *name*, not the key (keys are never stored in the file); Ogun warns at startup, on `/provider list`, and when switching if that variable isn't set in its environment. For the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
 
 Notes:
 

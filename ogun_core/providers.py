@@ -154,6 +154,18 @@ class OpenAICompatClient:
             data = self._request_json("/v1/models", timeout=5.0)
             models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
             return True, f"Connected to {self.label} at {self.host} ({len(models)} model(s) available)."
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                key_note = ("the key it was given was rejected" if self.api_key
+                            else "no API key was given")
+                return (
+                    False,
+                    f"{self.label} at {self.host} refused the request (HTTP {exc.code} Unauthorized): "
+                    f"the server requires an API key and {key_note}. Provide one with $OGUN_LLM_API_KEY, "
+                    "or save this endpoint as a custom provider whose keyenv names the key's env var "
+                    "(/provider add <name> <host> [model] keyenv=<VAR>).",
+                )
+            return False, f"{self.label} at {self.host} returned HTTP {exc.code}."
         except Exception as exc:
             return (
                 False,
@@ -734,7 +746,8 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
         if definition.get("model"):
             extras.append(f"model={definition['model']}")
         if definition.get("api_key_env"):
-            extras.append(f"keyenv={definition['api_key_env']}")
+            env_name = str(definition["api_key_env"])
+            extras.append(f"keyenv={env_name}" + ("" if os.environ.get(env_name) else " (NOT SET)"))
         source = "config/providers.json" if sources.get(name) == "file" else "$OGUN_CUSTOM_PROVIDERS"
         is_active = active_display is not None and name == active_display.strip().lower()
         lines.append(f" {mark(is_active)} {name:12s} {definition['host']}"
@@ -793,7 +806,8 @@ def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None)
     """Resolve a provider name (built-in OR custom) to everything needed to build its client:
 
     {"kind": canonical built-in kind, "host": base URL, "model": default model or None,
-     "api_key": Bearer key or None, "display": name to show the user}
+     "api_key": Bearer key or None, "key_env": env var the key was to come from (custom
+     providers only; lets callers warn when it is referenced but unset), "display": name shown}
 
     Returns None for an unknown name. An explicit new_host always wins; a custom provider's
     host comes from its definition; $OGUN_LLM_HOST and presets fill the rest.
@@ -804,7 +818,7 @@ def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None)
     if kind is not None:
         api_key = os.environ.get("OGUN_LLM_API_KEY") or None
         return {"kind": kind, "host": resolve_provider_host(kind, new_host),
-                "model": None, "api_key": api_key if kind != "ollama" else None,
+                "model": None, "api_key": api_key if kind != "ollama" else None, "key_env": None,
                 "display": PROVIDER_LABELS.get(kind, kind)}
     definition = get_custom_provider(name)
     if definition is None:
@@ -817,6 +831,7 @@ def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None)
         api_key = str(definition["api_key"])
     return {"kind": "openai", "host": (new_host or str(definition["host"])).rstrip("/"),
             "model": definition.get("model"), "api_key": api_key,
+            "key_env": str(key_env) if key_env else None,
             "display": str(name).strip()}
 
 
@@ -940,6 +955,11 @@ class ProviderSession:
             return True, f"Already using {self.label} at {self.host} with model '{self.model}'."
         host = target["host"]
         model = target["model"] or self.model
+        key_note = ""
+        if target.get("key_env") and not target.get("api_key"):
+            key_note = (f" Note: this provider's keyenv names ${target['key_env']}, which is not set in "
+                        "Ogun's environment, so no API key was sent. (keyenv takes the NAME of an "
+                        "environment variable, not the key itself.)")
 
         server: Optional[LlamaCppServer] = None
         gguf = Path(self.model).expanduser() if str(self.model).lower().endswith(".gguf") else None
@@ -955,7 +975,7 @@ class ProviderSession:
         if not ok_conn:
             if server is not None:
                 server.stop()
-            return False, f"{msg} (Still using {self.label}.)"
+            return False, f"{msg} (Still using {self.label}.){key_note}"
 
         # Commit: leave the old target cleanly, then swap.
         if self.provider == "ollama" and kind != "ollama":
@@ -967,7 +987,7 @@ class ProviderSession:
             self.model = str(target["model"])
         self.llama_server = server
         note = self.adopt_served_model()
-        result = f"Switched to {self.label} at {host}, model '{self.model}'.{note}"
+        result = f"Switched to {self.label} at {host}, model '{self.model}'.{note}{key_note}"
         if kind == "ollama" and gguf is not None and gguf.is_file():
             ok_g, detail = self.activate_gguf(gguf)
             result += f" {detail}"
