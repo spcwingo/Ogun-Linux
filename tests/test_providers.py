@@ -688,6 +688,12 @@ def test_parse_provider_command() -> None:
                    "model": "qwen3-32b", "api_key_env": "BB_KEY", "api_key": None}, add
     assert parse("/provider add bigbox http://h:8000")["model"] is None
     assert parse("/provider remove bigbox") == {"action": "remove", "name": "bigbox"}
+    # tolerant add forms: named fields in any position, api-key= alias
+    named = parse("/provider add a host=http://h:1 model=m1 api-key=sk-9")
+    assert named["host"] == "http://h:1" and named["model"] == "m1" and named["api_key"] == "sk-9", named
+    mixed = parse("/provider add a host://h:2 model=m2 api-key=sk-8")
+    assert mixed["action"] == "add" and mixed["host"] == "host://h:2" and mixed["api_key"] == "sk-8", mixed
+    assert parse("/provider edit a api-key=sk-7")["changes"] == {"key": "sk-7"}
     assert parse("/provider add onlyname") is None
     assert parse("/provider remove") is None
     assert parse("/provider a b c") is None

@@ -45,6 +45,10 @@ def parse_provider_command(text: str):
            | /provider add <name> <host> [model] [keyenv=VAR] [key=KEY]
            | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>] [key=<KEY>]
            | /provider remove <name>
+
+    The add/edit forms also accept named fields in any order (host=..., model=...,
+    keyenv=..., key=..., api-key=... as an alias of key=), since that is how most
+    other tools spell them.
     """
     match = _PROVIDER_CMD.match(text or "")
     if not match:
@@ -67,24 +71,36 @@ def parse_provider_command(text: str):
             if "=" not in tok:
                 return None
             field, value = tok.split("=", 1)
-            if field.lower() not in ("host", "model", "keyenv", "key"):
+            field = field.lower()
+            if field in ("api-key", "apikey"):
+                field = "key"
+            if field not in ("host", "model", "keyenv", "key"):
                 return None
-            changes[field.lower()] = value
+            changes[field] = value
         return {"action": "edit", "name": tokens[1], "changes": changes}
     if head == "add":
-        if len(tokens) < 3 or len(tokens) > 6:
+        if len(tokens) < 3 or len(tokens) > 7:
             return None
-        model, keyenv, key = None, None, None
-        for tok in tokens[3:]:
-            if tok.lower().startswith("keyenv="):
+        host, model, keyenv, key = None, None, None, None
+        for tok in tokens[2:]:
+            low = tok.lower()
+            if low.startswith("keyenv="):
                 keyenv = tok.split("=", 1)[1] or None
-            elif tok.lower().startswith("key="):
+            elif low.startswith("key=") or low.startswith("api-key=") or low.startswith("apikey="):
                 key = tok.split("=", 1)[1] or None
+            elif low.startswith("model="):
+                model = tok.split("=", 1)[1] or None
+            elif low.startswith("host="):
+                host = tok.split("=", 1)[1] or None
+            elif host is None:
+                host = tok
             elif model is None:
                 model = tok
             else:
                 return None
-        return {"action": "add", "name": tokens[1], "host": tokens[2], "model": model,
+        if not host:
+            return None
+        return {"action": "add", "name": tokens[1], "host": host, "model": model,
                 "api_key_env": keyenv, "api_key": key}
     if head in ("remove", "rm", "delete"):
         if len(tokens) != 2:
@@ -325,6 +341,13 @@ def main() -> None:
                 else:  # remove
                     _ok, _msg = session.remove_provider(provider_cmd["name"])
                     print(f"\n{_msg}")
+                continue
+            if _PROVIDER_CMD.match(user_input):
+                # Starts with /provider but did not parse: show usage instead of sending a
+                # malformed command to the model as if it were chat prose.
+                print("\nThat /provider line didn't parse. Forms: /provider [list] | /provider <name> [host] | "
+                      "/provider add <name> <host> [model] [keyenv=VAR] [key=KEY] | "
+                      "/provider edit <name> [host=|model=|keyenv=|key=] | /provider remove <name>")
                 continue
             model_match = _MODEL_CMD.match(user_input)
             if model_match:
