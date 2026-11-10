@@ -163,7 +163,7 @@ class OpenAICompatClient:
                     f"{self.label} at {self.host} refused the request (HTTP {exc.code} Unauthorized): "
                     f"the server requires an API key and {key_note}. Provide one with $OGUN_LLM_API_KEY, "
                     "or save this endpoint as a custom provider whose keyenv names the key's env var "
-                    "(/provider add <name> <host> [model] keyenv=<VAR>).",
+                    "(/provider add <name> <host> [model] key=<api-key>, or keyenv=<VAR> naming the key's env var).",
                 )
             return False, f"{self.label} at {self.host} returned HTTP {exc.code}."
         except Exception as exc:
@@ -601,7 +601,10 @@ def load_custom_providers() -> Dict[str, Dict[str, Any]]:
 
         {"host": "http://192.168.1.50:8000",          # required
          "model": "qwen3-32b",                        # optional default model
-         "api_key_env": "MY_SERVER_KEY"}              # optional: env var holding a Bearer key
+         "api_key_env": "MY_SERVER_KEY",              # optional: env var holding a Bearer key
+         "api_key": "sk-..."}                         # optional: the Bearer key itself, stored
+                                                      # in the file (local use; file is chmod 600
+                                                      # whenever any key is stored)
 
     Keys are the provider names as typed (matched case-insensitively). Never raises: a malformed
     file or variable simply contributes nothing.
@@ -651,6 +654,20 @@ def _read_custom_providers_file() -> Dict[str, Any]:
 def _write_custom_providers_file(data: Dict[str, Any]) -> None:
     CUSTOM_PROVIDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
     CUSTOM_PROVIDERS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # A stored literal API key (api_key) is a local secret: tighten the file to owner-only.
+    if any(isinstance(d, dict) and d.get("api_key") for d in data.values()):
+        try:
+            os.chmod(CUSTOM_PROVIDERS_PATH, 0o600)
+        except OSError:
+            pass
+
+
+def _describe_definition(definition: Dict[str, Any]) -> str:
+    """'host=..., model=...' for display, with any stored API key redacted."""
+    parts = []
+    for k, v in definition.items():
+        parts.append(f"{k}=stored" if k == "api_key" else f"{k}={v}")
+    return ", ".join(parts)
 
 
 #: Words that are /provider subcommands; a custom provider with one of these names could never be
@@ -673,7 +690,8 @@ def validate_custom_provider(name: str, host: str) -> Optional[str]:
 
 
 def save_custom_provider(name: str, host: str, model: Optional[str] = None,
-                         api_key_env: Optional[str] = None) -> Tuple[bool, str]:
+                         api_key_env: Optional[str] = None,
+                         api_key: Optional[str] = None) -> Tuple[bool, str]:
     """Define (or overwrite) a custom provider in config/providers.json. Never raises."""
     error = validate_custom_provider(name, host)
     if error:
@@ -683,6 +701,8 @@ def save_custom_provider(name: str, host: str, model: Optional[str] = None,
         definition["model"] = str(model).strip()
     if api_key_env:
         definition["api_key_env"] = str(api_key_env).strip()
+    if api_key:
+        definition["api_key"] = str(api_key).strip()
     try:
         data = _read_custom_providers_file()
         data[str(name).strip()] = definition
@@ -748,6 +768,8 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
         if definition.get("api_key_env"):
             env_name = str(definition["api_key_env"])
             extras.append(f"keyenv={env_name}" + ("" if os.environ.get(env_name) else " (NOT SET)"))
+        if definition.get("api_key"):
+            extras.append("key=stored")
         source = "config/providers.json" if sources.get(name) == "file" else "$OGUN_CUSTOM_PROVIDERS"
         is_active = active_display is not None and name == active_display.strip().lower()
         lines.append(f" {mark(is_active)} {name:12s} {definition['host']}"
@@ -758,9 +780,10 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
 
 
 def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[bool, str]:
-    """Edit fields of a file-defined custom provider. `changes` maps host/model/keyenv to a new
-    value; an empty string clears model/keyenv (host cannot be cleared). With no changes, just
-    reports the current definition. Env-defined providers cannot be edited here. Never raises."""
+    """Edit fields of a file-defined custom provider. `changes` maps host/model/keyenv/key to a
+    new value; an empty string clears model/keyenv/key (host cannot be cleared). With no changes,
+    just reports the current definition (API key redacted). Env-defined providers cannot be
+    edited here. Never raises."""
     key = str(name or "").strip()
     data = _read_custom_providers_file()
     file_key = next((k for k in data if k.strip().lower() == key.lower()), None)
@@ -772,8 +795,8 @@ def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[
 
     definition = dict(data[file_key])
     if not changes:
-        shown = ", ".join(f"{k}={v}" for k, v in definition.items())
-        return True, f"'{file_key}': {shown}. Edit with /provider edit {file_key} host=<url> | model=<id> | keyenv=<VAR> (empty value clears model/keyenv)."
+        return True, (f"'{file_key}': {_describe_definition(definition)}. Edit with /provider edit {file_key} "
+                      "host=<url> | model=<id> | keyenv=<VAR> | key=<api-key> (empty value clears model/keyenv/key).")
 
     if "host" in changes:
         new_host = (changes["host"] or "").strip()
@@ -793,13 +816,18 @@ def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[
             definition["api_key_env"] = value
         else:
             definition.pop("api_key_env", None)
+    if "key" in changes:
+        value = (changes["key"] or "").strip()
+        if value:
+            definition["api_key"] = value
+        else:
+            definition.pop("api_key", None)
     try:
         data[file_key] = definition
         _write_custom_providers_file(data)
     except Exception as exc:
         return False, f"Could not update {CUSTOM_PROVIDERS_PATH} ({exc})."
-    shown = ", ".join(f"{k}={v}" for k, v in definition.items())
-    return True, f"Updated '{file_key}': {shown}."
+    return True, f"Updated '{file_key}': {_describe_definition(definition)}."
 
 
 def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -996,11 +1024,13 @@ class ProviderSession:
         return True, result
 
     def add_provider(self, name: str, host: str, model: Optional[str] = None,
-                     api_key_env: Optional[str] = None) -> Tuple[bool, str]:
+                     api_key_env: Optional[str] = None,
+                     api_key: Optional[str] = None) -> Tuple[bool, str]:
         """Define a custom provider from inside chat (/provider add): save it to
         config/providers.json, then switch to it. An unreachable endpoint is still saved;
         the session just stays on the current provider. (ok, message); never raises."""
-        ok, msg = save_custom_provider(name, host, model=model, api_key_env=api_key_env)
+        ok, msg = save_custom_provider(name, host, model=model, api_key_env=api_key_env,
+                                       api_key=api_key)
         if not ok:
             return False, msg
         switched, switch_msg = self.switch_provider(str(name).strip(), force=True)

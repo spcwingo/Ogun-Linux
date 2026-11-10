@@ -42,8 +42,8 @@ def parse_provider_command(text: str):
     """Parse a /provider command line into an action dict, or None when it is not a well-formed command.
 
     Forms: /provider | /provider list | /provider <name> [host]
-           | /provider add <name> <host> [model] [keyenv=VAR]
-           | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>]
+           | /provider add <name> <host> [model] [keyenv=VAR] [key=KEY]
+           | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>] [key=<KEY>]
            | /provider remove <name>
     """
     match = _PROVIDER_CMD.match(text or "")
@@ -59,7 +59,7 @@ def parse_provider_command(text: str):
             return None
         return {"action": "list"}
     if head == "edit":
-        # /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>]  (no fields = show it)
+        # /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>] [key=<KEY>]  (no fields = show it)
         if len(tokens) < 2:
             return None
         changes = {}
@@ -67,22 +67,25 @@ def parse_provider_command(text: str):
             if "=" not in tok:
                 return None
             field, value = tok.split("=", 1)
-            if field.lower() not in ("host", "model", "keyenv"):
+            if field.lower() not in ("host", "model", "keyenv", "key"):
                 return None
             changes[field.lower()] = value
         return {"action": "edit", "name": tokens[1], "changes": changes}
     if head == "add":
-        if len(tokens) < 3 or len(tokens) > 5:
+        if len(tokens) < 3 or len(tokens) > 6:
             return None
-        model, keyenv = None, None
+        model, keyenv, key = None, None, None
         for tok in tokens[3:]:
             if tok.lower().startswith("keyenv="):
                 keyenv = tok.split("=", 1)[1] or None
+            elif tok.lower().startswith("key="):
+                key = tok.split("=", 1)[1] or None
             elif model is None:
                 model = tok
             else:
                 return None
-        return {"action": "add", "name": tokens[1], "host": tokens[2], "model": model, "api_key_env": keyenv}
+        return {"action": "add", "name": tokens[1], "host": tokens[2], "model": model,
+                "api_key_env": keyenv, "api_key": key}
     if head in ("remove", "rm", "delete"):
         if len(tokens) != 2:
             return None
@@ -298,7 +301,7 @@ def main() -> None:
                 if provider_cmd["action"] == "status":
                     print(f"\n{session.status()}\n"
                           "Switch with /provider <name> [host]  |  /provider list shows every provider  |  "
-                          "define one here: /provider add <name> <host> [model] [keyenv=VAR]  |  "
+                          "define one here: /provider add <name> <host> [model] [keyenv=VAR] [key=KEY]  |  "
                           "/provider edit <name> [field=value]  |  /provider remove <name>")
                 elif provider_cmd["action"] == "list":
                     print(f"\n{provider_listing(session.provider, session.label)}")
@@ -308,7 +311,8 @@ def main() -> None:
                     print(f"\n{_msg}")
                 elif provider_cmd["action"] == "add":
                     _ok, _msg = session.add_provider(provider_cmd["name"], provider_cmd["host"],
-                                                     provider_cmd["model"], provider_cmd["api_key_env"])
+                                                     provider_cmd["model"], provider_cmd["api_key_env"],
+                                                     provider_cmd["api_key"])
                     engine.client = session.client
                     print(f"\n{_msg}")
                 elif provider_cmd["action"] == "edit":

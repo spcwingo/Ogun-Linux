@@ -154,9 +154,9 @@ Ollama is the default, but Ogun can chat with models served by the other local t
 | `/provider lmstudio` | switch to LM Studio (default http://127.0.0.1:1234) |
 | `/provider openai http://127.0.0.1:8000` | switch to any OpenAI-compatible server (llama-server, vLLM, HF TGI, Unsloth Studio, ...) |
 | `/provider ollama` | switch back to Ollama |
-| `/provider add bigbox http://192.168.1.50:8000 qwen3-32b` | define a custom provider **from inside chat**: saved to `config/providers.json`, then switched to (add `keyenv=VAR` to name an env var holding its API key) |
+| `/provider add bigbox http://192.168.1.50:8000 qwen3-32b` | define a custom provider **from inside chat**: saved to `config/providers.json`, then switched to (add `key=KEY` to store its API key right in the file, or `keyenv=VAR` to name an env var holding it) |
 | `/provider list` | list every provider — built-ins and customs — with host, default model, key reference, where it's defined, and which one is active |
-| `/provider edit bigbox model=qwen3-8b` | change one field of a saved provider (`host=`, `model=`, `keyenv=`; empty value clears model/keyenv). `/provider edit bigbox` alone shows its definition. Editing the active provider applies live |
+| `/provider edit bigbox model=qwen3-8b` | change one field of a saved provider (`host=`, `model=`, `keyenv=`, `key=`; empty value clears model/keyenv/key). `/provider edit bigbox` alone shows its definition (key redacted). Editing the active provider applies live |
 | `/provider remove bigbox` | delete a saved custom provider |
 | `/model llama3.1:8b` | switch model: an Ollama tag, the id a server is serving, or a path to a `.gguf` file |
 | `/model ~/models/my-finetune-Q4_K_M.gguf` | run a GGUF directly: Ogun launches `llama-server` for it (provider `llama.cpp`) or imports it into Ollama (provider `ollama`) |
@@ -172,7 +172,7 @@ A failed switch (server down, model not loaded there) changes nothing — the cu
 OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environment
 ```
 
-**Custom endpoints.** Any OpenAI-compatible base URL works ad hoc via `--host` / `OGUN_LLM_HOST` / `/provider openai <url>` — including a path prefix, e.g. `http://myserver:9000/llm`. To give an endpoint a reusable name, define it once in `config/providers.json` — or right from the chat prompt with `/provider add bigbox http://192.168.1.50:8000 qwen3-32b`, which saves the same file and switches to it (`/provider remove bigbox` deletes it again; `keyenv=VAR` adds a key reference):
+**Custom endpoints.** Any OpenAI-compatible base URL works ad hoc via `--host` / `OGUN_LLM_HOST` / `/provider openai <url>` — including a path prefix, e.g. `http://myserver:9000/llm`. To give an endpoint a reusable name, define it once in `config/providers.json` — or right from the chat prompt with `/provider add bigbox http://192.168.1.50:8000 qwen3-32b`, which saves the same file and switches to it (`/provider remove bigbox` deletes it again; `key=KEY` stores an API key in the file, `keyenv=VAR` references one by env var name):
 
 ```json
 {
@@ -180,7 +180,7 @@ OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environme
 }
 ```
 
-Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, `api_key_env` names the environment variable holding it — the variable's *name*, not the key (keys are never stored in the file); Ogun warns at startup, on `/provider list`, and when switching if that variable isn't set in its environment. For the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
+Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, there are two ways to supply it: `api_key_env` names the environment variable holding it — the variable's *name*, not the key — and Ogun warns at startup, on `/provider list`, and when switching if that variable isn't set in its environment; or `api_key` (added in chat as `key=...`) stores the key itself in `config/providers.json`, the zero-friction route for a local-only setup — the file is chmod 600 whenever a key is stored, the key is never printed back (listings and edit views show `key=stored`), and a set `api_key_env` still wins over the stored key. For the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
 
 Notes:
 

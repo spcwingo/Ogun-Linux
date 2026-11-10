@@ -500,6 +500,62 @@ def test_session_switch_to_custom_provider() -> None:
         assert ok and "Already using bigbox" in msg, msg
 
 
+def test_literal_api_key_support() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        providers.CUSTOM_PROVIDERS_PATH = Path(tmp) / "providers.json"
+        os.environ.pop("OGUN_CUSTOM_PROVIDERS", None)
+
+        # save with a literal key: stored, resolvable, and the file goes owner-only
+        ok, msg = providers.save_custom_provider("keybox", "http://127.0.0.1:18080", api_key="sk-literal-1")
+        assert ok, msg
+        target = resolve_provider_target("keybox")
+        assert target["api_key"] == "sk-literal-1", target
+        mode = os.stat(providers.CUSTOM_PROVIDERS_PATH).st_mode & 0o777
+        assert mode == 0o600, oct(mode)
+
+        # the key value never leaks into the listing or edit views
+        listing = providers.provider_listing()
+        assert "key=stored" in listing and "sk-literal-1" not in listing, listing
+        ok, shown = providers.edit_custom_provider("keybox", {})
+        assert ok and "key=stored" in shown and "sk-literal-1" not in shown, shown
+
+        # keyenv (when set) wins over the stored key; stored key is the fallback
+        providers.edit_custom_provider("keybox", {"keyenv": "KEYBOX_ENV"})
+        with patch.dict(os.environ, {"KEYBOX_ENV": "from-env"}):
+            assert resolve_provider_target("keybox")["api_key"] == "from-env"
+        os.environ.pop("KEYBOX_ENV", None)
+        assert resolve_provider_target("keybox")["api_key"] == "sk-literal-1"
+
+        # edit can replace and clear the stored key
+        ok, msg = providers.edit_custom_provider("keybox", {"key": "sk-literal-2"})
+        assert ok and resolve_provider_target("keybox")["api_key"] == "sk-literal-2", msg
+        ok, msg = providers.edit_custom_provider("keybox", {"key": ""})
+        assert ok and resolve_provider_target("keybox")["api_key"] is None, msg
+
+        # session add with a literal key authenticates end to end (Bearer header sent)
+        seen = {}
+
+        def capturing(req, timeout=None):
+            seen["auth"] = req.headers.get("Authorization")
+            return _router_urlopen(req, timeout=timeout)
+
+        session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+        with patch("ogun_core.providers.urllib.request.urlopen", capturing):
+            ok, msg = session.add_provider("authbox", "http://127.0.0.1:18080", api_key="sk-add-9")
+            assert ok and session.label == "authbox", msg
+            assert seen["auth"] == "Bearer sk-add-9", seen
+
+    # parser: key= in add (any position), both key forms together, key in edit
+    import main as ogun_main
+    parse_provider_command = ogun_main.parse_provider_command
+    parsed = parse_provider_command("/provider add a http://h:1 m1 key=sk-1")
+    assert parsed["api_key"] == "sk-1" and parsed["model"] == "m1", parsed
+    parsed = parse_provider_command("/provider add a http://h:1 keyenv=V key=sk-2")
+    assert parsed["api_key_env"] == "V" and parsed["api_key"] == "sk-2", parsed
+    parsed = parse_provider_command("/provider edit a key=sk-3")
+    assert parsed["changes"] == {"key": "sk-3"}, parsed
+
+
 def test_unset_keyenv_is_surfaced() -> None:
     os.environ.pop("DEFINITELY_UNSET_VAR_XYZ", None)
     env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
@@ -580,7 +636,7 @@ def test_parse_provider_command() -> None:
     assert parse("/provider openai http://h:1")["host"] == "http://h:1"
     add = parse("/provider add bigbox http://h:8000 qwen3-32b keyenv=BB_KEY")
     assert add == {"action": "add", "name": "bigbox", "host": "http://h:8000",
-                   "model": "qwen3-32b", "api_key_env": "BB_KEY"}, add
+                   "model": "qwen3-32b", "api_key_env": "BB_KEY", "api_key": None}, add
     assert parse("/provider add bigbox http://h:8000")["model"] is None
     assert parse("/provider remove bigbox") == {"action": "remove", "name": "bigbox"}
     assert parse("/provider add onlyname") is None
@@ -688,6 +744,7 @@ def main() -> int:
         test_api_key_header_sent,
         test_check_connection_401_names_the_key_problem,
         test_session_switch_to_custom_provider,
+        test_literal_api_key_support,
         test_unset_keyenv_is_surfaced,
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,
