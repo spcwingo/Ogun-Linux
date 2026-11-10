@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Multiple inference providers: besides Ollama, Ogun can chat with any OpenAI-compatible local server (`--provider openai|lmstudio`, e.g. llama-server, vLLM, HF TGI, Unsloth Studio) and can launch `llama-server` itself for a GGUF file (`--provider llama.cpp --model file.gguf`). `--list-models` / `/models` discovers local models (Ollama library, running servers, Hugging Face cache, GGUF folders, training exports), and `/model` / `/provider` switch model and provider mid-chat without restarting.
 - Builds have no attempt limit: plugin builds, tool builds and tool updates retry until they pass. `Ctrl+C` stops one; `OGUN_BUILD_MAX_ATTEMPTS` caps them.
 - Failure research: on repeated failures the model writes a root-cause diagnosis before the next fix. Optional web search for the error (`OGUN_WEB_RESEARCH=1`, off by default).
 - After five identical failures a build starts over from scratch.

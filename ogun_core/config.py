@@ -11,6 +11,10 @@ import sys
 MODEL_NAME = os.environ.get("OGUN_MODEL", "qwen2.5-coder:14b")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
+# Inference provider: "ollama" (default) | "openai" | "llama.cpp" | "lmstudio" (see ogun_core.providers).
+# Non-Ollama providers talk to an OpenAI-compatible server at OGUN_LLM_HOST / --host.
+LLM_PROVIDER = os.environ.get("OGUN_PROVIDER", "ollama")
+
 # Ollama generation hyperparameters (optimized for Qwen2.5-Coder)
 TEMPERATURE = 0.1
 TOP_P = 0.95

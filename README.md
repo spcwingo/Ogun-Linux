@@ -18,7 +18,7 @@
 |---|---|
 | **Linux** | the shell-script launchers |
 | **Python 3.12** | runs Ogun; the launchers create their own virtual environment |
-| **[Ollama](https://ollama.com/download)** | serves the model |
+| **[Ollama](https://ollama.com/download)** | serves the model (default provider; llama.cpp, LM Studio and other OpenAI-compatible servers also work — see [Using models from other local tools](#using-models-from-other-local-tools-unsloth-hugging-face-llamacpp-lm-studio-)) |
 | **~10 GB free disk** + RAM/VRAM for the model | `qwen2.5-coder:14b` is a ~9 GB download |
 | NVIDIA or AMD GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
 
@@ -58,7 +58,10 @@ Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels
 |---|---|
 | `--once "prompt"` | run a single turn, print the answer, exit |
 | `--build-plugin "description"` | have the model write, test and mount a plugin (see below) |
-| `--model NAME` | use another Ollama model (default `qwen2.5-coder:14b`) |
+| `--model NAME` | use another model (default `qwen2.5-coder:14b`). With a non-Ollama provider this is that server's model id; a path to a `.gguf` file works with `--provider llama.cpp` (Ogun launches llama-server) or `--provider ollama` (auto-import) |
+| `--provider NAME` | where the model runs: `ollama` (default), `openai` (any OpenAI-compatible local server), `llama.cpp`, `lmstudio` |
+| `--host URL` | the inference server's base URL (default: the provider's usual local address) |
+| `--list-models` | list every local model Ogun can find, with the command that runs each, then exit |
 | `--no-tools` | plain chat, no tool execution |
 | `--vram max\|shared\|cpu` | start with a fixed GPU profile (turns hardware auto-tuning off for this run) |
 | `--hardware-info` | show the detected hardware and the settings Ogun would use, then exit (`--json` for machine-readable) |
@@ -136,6 +139,43 @@ Idle models are released after **2 minutes** (`keep_alive`), and Ogun unloads th
 
 ---
 
+## Using models from other local tools (Unsloth, Hugging Face, llama.cpp, LM Studio, ...)
+
+Ollama is the default, but Ogun can chat with models served by the other local tools you already use. Nothing leaves your machine either way.
+
+**See what you have.** `./run_ogun.sh --list-models` (or `/models` in chat) scans Ollama's library, any running llama.cpp / LM Studio / vLLM server, your Hugging Face cache (`~/.cache/huggingface`), `~/models`, LM Studio's model folder, and Ogun's own training exports (`training/data/exports`) — and prints each model with the exact command that runs it. Add folders with `OGUN_MODEL_DIRS`.
+
+**Switch without restarting.** In chat:
+
+| Command | What it does |
+|---|---|
+| `/provider` | show the current provider, host and model |
+| `/provider lmstudio` | switch to LM Studio (default http://127.0.0.1:1234) |
+| `/provider openai http://127.0.0.1:8000` | switch to any OpenAI-compatible server (llama-server, vLLM, HF TGI, Unsloth Studio, ...) |
+| `/provider ollama` | switch back to Ollama |
+| `/model llama3.1:8b` | switch model: an Ollama tag, the id a server is serving, or a path to a `.gguf` file |
+| `/model ~/models/my-finetune-Q4_K_M.gguf` | run a GGUF directly: Ogun launches `llama-server` for it (provider `llama.cpp`) or imports it into Ollama (provider `ollama`) |
+
+A failed switch (server down, model not loaded there) changes nothing — the current provider keeps serving. Switching away from Ollama unloads its model so the VRAM is freed; a llama-server Ogun launched itself is stopped when you switch away or exit.
+
+**From the command line / environment:**
+
+```bash
+./run_ogun.sh --provider lmstudio                      # model already loaded in LM Studio
+./run_ogun.sh --provider openai --host http://127.0.0.1:8000 --model my/model-id
+./run_ogun.sh --provider llama.cpp --model ~/models/model-Q4_K_M.gguf   # Ogun runs llama-server for you
+OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environment
+```
+
+Notes:
+
+- With an external server and no `--model`, Ogun uses the model that server reports as loaded.
+- Hardware auto-tuning and `/vram` steer Ollama's own loading, so they apply to the Ollama provider. A llama-server that Ogun launches itself still gets its GPU layer count and context size from the active VRAM profile (`--vram max|shared|cpu`).
+- Hugging Face-format folders (safetensors) can't be served by Ogun directly: serve them with vLLM / Unsloth Studio / LM Studio and use `--provider openai`, or export a GGUF (which is what the training pipeline below produces) and run the file.
+- This closes the training loop: fine-tune with the Unsloth pipeline, and the exported GGUF in `training/data/exports` shows up in `--list-models`, ready to run via llama.cpp or Ollama.
+
+---
+
 ## Building plugins
 
 A plugin is one Python class that inherits `BaseTool`, plus a unit test.
@@ -202,8 +242,11 @@ All optional. Set them as environment variables before running `./run_ogun.sh`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OGUN_MODEL` | `qwen2.5-coder:14b` | Ollama model name |
+| `OGUN_MODEL` | `qwen2.5-coder:14b` | model name |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | where Ollama listens |
+| `OGUN_PROVIDER` | `ollama` | inference provider: `ollama`, `openai`, `llama.cpp` or `lmstudio` |
+| `OGUN_LLM_HOST` | - | base URL for non-Ollama providers (overridden by `--host`) |
+| `OGUN_MODEL_DIRS` | - | extra folders to scan for GGUF/HF models (`:`-separated), on top of `~/models`, the Hugging Face cache, LM Studio's folder and `training/data/exports` |
 | `OGUN_VRAM_PROFILE` | `shared` | `max`, `shared` or `cpu` at start-up |
 | `OGUN_NUM_GPU` | - | custom layer count (`12`), or `auto` to let Ollama decide; overrides the profile |
 | `OGUN_KEEP_ALIVE` | `2m` | how long an idle model stays loaded |
@@ -319,6 +362,7 @@ Ogun-Linux/
 │   ├── hardware.py          hardware probe + auto-tuner (pure, stdlib only)
 │   ├── autotune.py          startup hook, CLI flags, saved profile
 │   ├── engine.py            Ollama client, chat loop, /vram commands
+│   ├── providers.py         other providers (OpenAI-compatible, llama.cpp), local model discovery, /model + /provider sessions
 │   ├── toolcalls.py         pure text tool-call parser
 │   ├── codetools.py         read / write / replace / syntax-check tools
 │   ├── plugin_manager.py    validate, test, hot-load, registry, quarantine

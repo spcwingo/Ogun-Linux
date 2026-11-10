@@ -8,12 +8,20 @@ import re
 import sys
 
 from ogun_core import autotune
-from ogun_core.config import BUILD_MAX_ATTEMPTS, MODEL_NAME, OLLAMA_HOST, PLUGIN_BUILDER_PROMPT
+from ogun_core.config import BUILD_MAX_ATTEMPTS, LLM_PROVIDER, MODEL_NAME, OLLAMA_HOST, PLUGIN_BUILDER_PROMPT
 from ogun_core.config import set_vram_profile
-from ogun_core.engine import CoreEngine, OllamaClient, handle_vram_command, unload_model
+from ogun_core.engine import CoreEngine, OllamaClient, handle_vram_command, is_vram_command, unload_model
 from ogun_core.paths import init_user_workspace
 from ogun_core.plugin_builder import build_plugin_staged, parse_code_blocks
 from ogun_core.plugin_manager import PluginManager
+from ogun_core.providers import (
+    PROVIDER_LABELS,
+    ProviderSession,
+    discover_local_models,
+    format_model_list,
+    normalize_provider,
+    resolve_provider_host,
+)
 
 
 UNLOAD_PHRASES = {
@@ -27,11 +35,37 @@ def is_unload_command(text: str) -> bool:
     return " ".join((text or "").lower().replace("?", " ").replace(".", " ").split()) in UNLOAD_PHRASES
 
 
+_PROVIDER_CMD = re.compile(r"^\s*/provider(?:\s+(\S+)(?:\s+(\S+))?)?\s*$", re.IGNORECASE)
+_MODEL_CMD = re.compile(r"^\s*/model(?:\s+(.+))?\s*$", re.IGNORECASE)
+
+
+def is_provider_command(text: str) -> bool:
+    """True only for '/provider' optionally followed by a provider name and a host, never for prose."""
+    return bool(_PROVIDER_CMD.match(text or ""))
+
+
+def is_model_command(text: str) -> bool:
+    """True only for '/model' optionally followed by a model tag/id or a .gguf path, never for prose."""
+    return bool(_MODEL_CMD.match(text or ""))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ogun Autonomous Coding Assistant")
     parser.add_argument("--once", type=str, help="Execute a single turn and exit.")
     parser.add_argument("--build-plugin", type=str, help="Prompt the model to build, verify, and mount a plugin.")
-    parser.add_argument("--model", type=str, default=None, help=f"Ollama model to use (default: {MODEL_NAME}).")
+    parser.add_argument("--model", type=str, default=None, help=f"Model to use (default: {MODEL_NAME}). "
+                        "With a non-Ollama provider this is the server's model id; a path to a .gguf file works "
+                        "with --provider llama.cpp (Ogun launches llama-server) or --provider ollama (auto-import).")
+    parser.add_argument("--provider", type=str, default=None,
+                        help="Inference provider: ollama (default) | openai | llama.cpp | lmstudio. "
+                             "Can also be set with $OGUN_PROVIDER. 'openai' means any OpenAI-compatible local "
+                             "server (llama-server, vLLM, HF TGI, Unsloth Studio, ...).")
+    parser.add_argument("--host", type=str, default=None,
+                        help="Base URL of the inference server (default: the provider's usual local address, "
+                             "or $OGUN_LLM_HOST). For Ollama this overrides $OLLAMA_HOST.")
+    parser.add_argument("--list-models", action="store_true",
+                        help="List every local model Ogun can find (Ollama library, running servers, GGUF files, "
+                             "Hugging Face cache, training exports) with the command that runs each, then exit.")
     parser.add_argument("--no-tools", action="store_true", help="Disable tool execution.")
     parser.add_argument("--unload", action="store_true",
                         help="Unload the model from Ollama (free its GPU memory) and exit.")
@@ -43,8 +77,23 @@ def main() -> None:
     args.model_explicit = args.model            # only a model typed on the command line is exempt from the 'does it fit' check
     args.model = args.model or MODEL_NAME
 
+    provider = normalize_provider(args.provider or LLM_PROVIDER)
+    if provider is None:
+        print(f"[ERROR] Unknown provider '{args.provider or LLM_PROVIDER}'. Use ollama, openai, llama.cpp or lmstudio.",
+              file=sys.stderr)
+        sys.exit(2)
+    host = resolve_provider_host(provider, args.host)
+
+    # --list-models is read-only discovery: no connection check, no workspace setup.
+    if args.list_models:
+        print(format_model_list(discover_local_models()))
+        sys.exit(0)
+
     # --unload must work even when nothing else can: handle it before any connection check or workspace setup.
     if args.unload:
+        if provider != "ollama":
+            print("[WARN] --unload applies to the Ollama provider; other servers manage their own model memory.")
+            sys.exit(0)
         result = unload_model(model=args.model)
         print(f"[{'OK' if result['unloaded'] else 'WARN'}] {result['detail']}")
         sys.exit(0)
@@ -60,25 +109,62 @@ def main() -> None:
         print(f"[*] VRAM profile: {profile} (num_gpu={num_gpu})")
 
     # Size the runtime to this machine (GPU layers, context window, threads, and a model that fits). Never fatal.
-    tuned = autotune.boot(args, args.model, OLLAMA_HOST)
-    if tuned and tuned.get("model_tag") and tuned["model_tag"] != args.model:
-        args.model = tuned["model_tag"]
+    # Auto-tuning sizes Ollama's own loading, so it only applies to the Ollama provider; other servers
+    # manage their own GPU use (for a llama-server Ogun launches itself, the VRAM profile above still
+    # supplies the GPU layer count and context size).
+    if provider == "ollama":
+        tuned = autotune.boot(args, args.model, OLLAMA_HOST)
+        if tuned and tuned.get("model_tag") and tuned["model_tag"] != args.model:
+            args.model = tuned["model_tag"]
+    else:
+        print(f"[*] Provider: {PROVIDER_LABELS[provider]} at {host}")
 
-    # Pre-flight check on Ollama connection
-    client = OllamaClient(model=args.model)
+    # The live session: provider + host + model + client, switchable mid-chat with /provider and /model.
+    from pathlib import Path as _Path
+    session = ProviderSession(provider, host, args.model)
+
+    # A .gguf file as --model: import it into Ollama, or serve it with a llama-server Ogun launches.
+    model_path = None
+    if args.model and str(args.model).lower().endswith(".gguf"):
+        candidate = _Path(str(args.model)).expanduser()
+        if candidate.is_file():
+            model_path = candidate
+    if model_path is not None:
+        ok, detail = session.activate_gguf(model_path)
+        print(f"[{'*' if ok else 'ERROR'}] {detail}")
+        if not ok:
+            sys.exit(2 if provider in ("openai", "lmstudio") else 1)
+        args.model = session.model
+    elif provider == "llama.cpp" and args.model_explicit:
+        print("[*] Attaching to the llama-server at the host above (no GGUF file given to launch).")
+
+    # Pre-flight check on the inference server
+    client = session.client
     connected, conn_msg = client.check_connection()
     if not connected:
         print(f"[ERROR] {conn_msg}", file=sys.stderr)
         sys.exit(1)
+    print(f"[*] {conn_msg}")
 
-    # Free the GPU when Ogun exits (normal exit, Ctrl+C, --once, --build-plugin). Opt out: OGUN_UNLOAD_ON_EXIT=0.
+    # With an external server and no explicit --model, use the model the server actually has loaded
+    # rather than Ogun's Ollama default (which that server has never heard of).
+    if provider != "ollama" and not args.model_explicit:
+        note = session.adopt_served_model()
+        if note:
+            print(f"[*]{note}")
+            args.model = session.model
+
+    # A managed llama-server is Ogun's child: always stop it at exit. Freeing the Ollama model's GPU
+    # memory on exit (normal exit, Ctrl+C, --once, --build-plugin) can be opted out: OGUN_UNLOAD_ON_EXIT=0.
+    atexit.register(session.stop_managed_server)
     if os.environ.get("OGUN_UNLOAD_ON_EXIT", "1") != "0":
         _unloaded = {"done": False}
 
         def _unload_on_exit() -> None:
             if not _unloaded["done"]:
                 _unloaded["done"] = True
-                unload_model(model=args.model)
+                if session.provider == "ollama":
+                    unload_model(model=session.model)
 
         atexit.register(_unload_on_exit)
 
@@ -117,9 +203,12 @@ def main() -> None:
 
     # 3. Interactive CLI loop
     print("=" * 60)
-    print(f"  Ogun Autonomous Coding Assistant (Model: {args.model})")
+    print(f"  Ogun Autonomous Coding Assistant (Model: {session.model} via {session.label})")
     print("  Type 'exit' or 'quit' to close. Press Ctrl+C to cancel a turn.")
-    print("  GPU memory: /vram auto | /vram shared | /vram max | /vram cpu | /vram free | /vram status")
+    if session.provider == "ollama":
+        print("  GPU memory: /vram auto | /vram shared | /vram max | /vram cpu | /vram free | /vram status")
+    print("  Switch anytime: /model <tag, id or .gguf path> | /provider <ollama|openai|llama.cpp|lmstudio>")
+    print("  Local models: /models lists everything Ogun found on this machine")
     print("=" * 60)
 
     while True:
@@ -130,17 +219,49 @@ def main() -> None:
             if user_input.lower() in ("exit", "quit"):
                 print("Goodbye.")
                 break
-            vram_reply = handle_vram_command(user_input, model=args.model)
+            if user_input.lower() == "/models":
+                print(f"\n{format_model_list(discover_local_models())}")
+                continue
+            provider_match = _PROVIDER_CMD.match(user_input)
+            if provider_match:
+                if provider_match.group(1) is None:
+                    print(f"\n{session.status()}\nProviders: ollama | openai | llama.cpp | lmstudio. "
+                          "Switch with /provider <name> [host], e.g. /provider lmstudio or /provider openai http://127.0.0.1:8000")
+                else:
+                    _ok, _msg = session.switch_provider(provider_match.group(1), provider_match.group(2))
+                    engine.client = session.client
+                    print(f"\n{_msg}")
+                continue
+            model_match = _MODEL_CMD.match(user_input)
+            if model_match:
+                if not model_match.group(1):
+                    print(f"\nCurrent model: {session.model} (via {session.label}).\n"
+                          "Switch with /model <model tag, server model id, or path to a .gguf file>. "
+                          "/models lists what Ogun found on this machine.")
+                else:
+                    _ok, _msg = session.switch_model(model_match.group(1).strip())
+                    engine.client = session.client
+                    print(f"\n{_msg}")
+                continue
+            if session.provider != "ollama" and is_vram_command(user_input):
+                print("\nVRAM profiles steer Ollama's own model loading. This provider's server manages "
+                      "its own GPU memory (for a llama-server Ogun launched, the layer split was set at launch).")
+                continue
+            vram_reply = handle_vram_command(user_input, model=session.model)
             if vram_reply is not None:
                 print(f"\n{vram_reply}")
                 continue
             if is_unload_command(user_input):
-                result = unload_model(model=args.model)
-                print(f"\n{result['detail']} The next question reloads the model (about 40 seconds).")
+                if session.provider == "ollama":
+                    result = unload_model(model=session.model)
+                    print(f"\n{result['detail']} The next question reloads the model (about 40 seconds).")
+                else:
+                    print(f"\n{session.client.unload()['detail']}")
                 continue
-            _gpu_note = autotune.refresh(OLLAMA_HOST, args.model)
-            if _gpu_note:
-                print(f"[Hardware] {_gpu_note}")
+            if session.provider == "ollama":
+                _gpu_note = autotune.refresh(OLLAMA_HOST, session.model)
+                if _gpu_note:
+                    print(f"[Hardware] {_gpu_note}")
             reply = engine.run_turn(user_input)
             print(f"\n{reply}")
         except KeyboardInterrupt:
