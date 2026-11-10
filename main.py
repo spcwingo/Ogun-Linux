@@ -126,6 +126,9 @@ def main() -> None:
     parser.add_argument("--list-providers", action="store_true",
                         help="List all providers (built-ins and custom providers from config/providers.json / "
                              "$OGUN_CUSTOM_PROVIDERS) with their hosts and default models, then exit.")
+    parser.add_argument("--max-rounds", type=int, default=None, metavar="N",
+                        help="Maximum tool execution rounds per turn (default: 50, or $OGUN_MAX_TOOL_ROUNDS). "
+                             "Raise it for long multi-step tasks.")
     parser.add_argument("--no-tools", action="store_true", help="Disable tool execution.")
     parser.add_argument("--unload", action="store_true",
                         help="Unload the model from Ollama (free its GPU memory) and exit.")
@@ -271,7 +274,7 @@ def main() -> None:
 
     # 2. Single turn mode
     if args.once:
-        reply = engine.run_turn(args.once)
+        reply = engine.run_turn(args.once, max_rounds=args.max_rounds)
         print(reply)
         sys.exit(0)
 
@@ -353,7 +356,7 @@ def main() -> None:
                 _gpu_note = autotune.refresh(OLLAMA_HOST, session.model)
                 if _gpu_note:
                     print(f"[Hardware] {_gpu_note}")
-            reply = engine.run_turn(user_input)
+            reply = engine.run_turn(user_input, max_rounds=args.max_rounds)
             print(f"\n{reply}")
         except KeyboardInterrupt:
             print("\nTurn canceled by user.")

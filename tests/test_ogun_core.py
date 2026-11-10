@@ -429,6 +429,53 @@ def test_engine_turn_loop_with_mock_client() -> None:
     assert len(pruned) < len(msgs)
 
 
+def test_tool_rounds_limit() -> None:
+    """Tool rounds per turn: config default (50 / OGUN_MAX_TOOL_ROUNDS), explicit arg wins."""
+    import ogun_core.config as cfg
+
+    saved_env = os.environ.pop("OGUN_MAX_TOOL_ROUNDS", None)
+    try:
+        assert cfg._resolve_max_tool_rounds() == 50
+        os.environ["OGUN_MAX_TOOL_ROUNDS"] = "7"
+        assert cfg._resolve_max_tool_rounds() == 7
+        os.environ["OGUN_MAX_TOOL_ROUNDS"] = "abc"
+        assert cfg._resolve_max_tool_rounds() == 50
+        os.environ["OGUN_MAX_TOOL_ROUNDS"] = "0"
+        assert cfg._resolve_max_tool_rounds() == 50
+    finally:
+        os.environ.pop("OGUN_MAX_TOOL_ROUNDS", None)
+        if saved_env is not None:
+            os.environ["OGUN_MAX_TOOL_ROUNDS"] = saved_env
+
+    class AlwaysToolClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            return {"content": "", "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"filepath": "sample.txt"}}}]}
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        (root / "sample.txt").write_text("hello", encoding="utf-8")
+        client = AlwaysToolClient()
+        engine = CoreEngine(client=client, base_dir=root)
+        saved_rounds = cfg.MAX_TOOL_ROUNDS
+        try:
+            cfg.MAX_TOOL_ROUNDS = 3
+            out = engine.run_turn("Please read sample.txt")
+            assert client.calls == 3, client.calls
+            assert "maximum tool execution rounds (3)" in out, out
+            assert "--max-rounds" in out, out  # the cap message says how to raise it
+            client.calls = 0
+            out = engine.run_turn("Please read sample.txt", max_rounds=5)
+            assert client.calls == 5, client.calls
+            assert "maximum tool execution rounds (5)" in out, out
+        finally:
+            cfg.MAX_TOOL_ROUNDS = saved_rounds
+
+
 def test_codetools_operations() -> None:
     """Test codetools: read_file, write_file, replace_in_file, and check_syntax."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -769,6 +816,7 @@ def run_all_tests() -> bool:
         ("4. AST Pre-Flight & Placeholder Checks", test_ast_validation),
         ("5. Dynamic Plugin Lifecycle & Registry Safety", test_plugin_lifecycle_and_registry_safety),
         ("6. Engine Turn Loop & Context Budget (Mock Client)", test_engine_turn_loop_with_mock_client),
+        ("6b. Tool Rounds Limit (config default, env override, explicit arg)", test_tool_rounds_limit),
         ("7. Codetools Operations (Write, Replace, Read, Syntax)", test_codetools_operations),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),
         ("9. Test Harness Two-Block Code Extraction", test_harness_code_extraction),

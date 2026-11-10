@@ -464,8 +464,15 @@ class CoreEngine:
         except Exception as exc:
             return f"Error executing tool '{name}': {exc}"
 
-    def run_turn(self, user_text: str, max_rounds: int = 10) -> str:
-        """Run an agentic conversational turn with tool execution loop and honesty verification."""
+    def run_turn(self, user_text: str, max_rounds: int = None) -> str:
+        """Run an agentic conversational turn with tool execution loop and honesty verification.
+
+        max_rounds caps the tool execution rounds for this turn; None (the default) uses
+        config.MAX_TOOL_ROUNDS (50 unless OGUN_MAX_TOOL_ROUNDS / --max-rounds overrides it).
+        """
+        if max_rounds is None:
+            from ogun_core.config import MAX_TOOL_ROUNDS
+            max_rounds = MAX_TOOL_ROUNDS
         turn_events = TurnEvents()
 
         # Handle short follow-up resumption after failure/timeout
@@ -682,7 +689,9 @@ class CoreEngine:
             f"### Turn Status Summary:\n"
             f"- Files written: {files_str}\n"
             f"- Tests executed: {len(turn_events.tests_executed)}{test_info}\n\n"
-            "Task is incomplete. Review the files and errors above before proceeding."
+            "Task is incomplete. Review the files and errors above before proceeding. "
+            "Say 'continue' to pick up where this left off, or raise the cap with "
+            "--max-rounds <n> (or OGUN_MAX_TOOL_ROUNDS) for longer tasks."
         )
         sanitized, _ = sanitize_reply(final_msg, turn_events, self.base_dir)
         self.last_turn_status = {

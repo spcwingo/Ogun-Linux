@@ -222,6 +222,27 @@ REQUEST_TIMEOUT = 300.0
 # press Ctrl+C to stop one. Set OGUN_BUILD_MAX_ATTEMPTS to a number to cap them again.
 BUILD_MAX_ATTEMPTS = int(os.environ.get("OGUN_BUILD_MAX_ATTEMPTS", "0") or 0)
 
+# Tool execution rounds per chat turn (one round = one model reply plus the tool calls it
+# asked for). 50 by default; override with OGUN_MAX_TOOL_ROUNDS or --max-rounds.
+DEFAULT_MAX_TOOL_ROUNDS = 50
+
+
+def _resolve_max_tool_rounds() -> int:
+    raw = (os.environ.get("OGUN_MAX_TOOL_ROUNDS") or "").strip()
+    if not raw:
+        return DEFAULT_MAX_TOOL_ROUNDS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        print(f"[Ogun] ignoring invalid OGUN_MAX_TOOL_ROUNDS={raw!r}; using {DEFAULT_MAX_TOOL_ROUNDS}.", file=sys.stderr)
+        return DEFAULT_MAX_TOOL_ROUNDS
+    return value
+
+
+MAX_TOOL_ROUNDS = _resolve_max_tool_rounds()
+
 # System instructions
 SYSTEM_PROMPT = """You are Ogun, an autonomous technical coding engine and developer assistant.
 You specialize in writing clean, reliable, and production-ready Python code, inspecting directories,

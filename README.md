@@ -264,6 +264,7 @@ All optional. Set them as environment variables before running `./run_ogun.sh`.
 | `OGUN_MODEL_DIRS` | - | extra folders to scan for GGUF/HF models (`:`-separated), on top of `~/models`, the Hugging Face cache, LM Studio's folder and `training/data/exports` |
 | `OGUN_CUSTOM_PROVIDERS` | - | custom named providers as a JSON object (`{"name": {"host": ..., "model": ..., "api_key_env": ...}}`); same format as `config/providers.json`, wins per name |
 | `OGUN_LLM_API_KEY` | - | Bearer key sent to the `openai` provider's server (most local servers don't need one) |
+| `OGUN_MAX_TOOL_ROUNDS` | `50` | tool execution rounds per chat turn (one round = one model reply plus its tool calls); `--max-rounds` overrides it for a run |
 | `OGUN_VRAM_PROFILE` | `shared` | `max`, `shared` or `cpu` at start-up |
 | `OGUN_NUM_GPU` | - | custom layer count (`12`), or `auto` to let Ollama decide; overrides the profile |
 | `OGUN_KEEP_ALIVE` | `2m` | how long an idle model stays loaded |
