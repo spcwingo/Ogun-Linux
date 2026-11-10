@@ -18,7 +18,7 @@ from ogun_core.providers import (
     ProviderSession,
     discover_local_models,
     format_model_list,
-    load_custom_providers,
+    provider_listing,
     resolve_provider_target,
 )
 
@@ -41,7 +41,9 @@ _MODEL_CMD = re.compile(r"^\s*/model(?:\s+(.+))?\s*$", re.IGNORECASE)
 def parse_provider_command(text: str):
     """Parse a /provider command line into an action dict, or None when it is not a well-formed command.
 
-    Forms: /provider | /provider <name> [host] | /provider add <name> <host> [model] [keyenv=VAR]
+    Forms: /provider | /provider list | /provider <name> [host]
+           | /provider add <name> <host> [model] [keyenv=VAR]
+           | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>]
            | /provider remove <name>
     """
     match = _PROVIDER_CMD.match(text or "")
@@ -52,6 +54,23 @@ def parse_provider_command(text: str):
         return {"action": "status"}
     tokens = rest.split()
     head = tokens[0].lower()
+    if head == "list":
+        if len(tokens) != 1:
+            return None
+        return {"action": "list"}
+    if head == "edit":
+        # /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>]  (no fields = show it)
+        if len(tokens) < 2:
+            return None
+        changes = {}
+        for tok in tokens[2:]:
+            if "=" not in tok:
+                return None
+            field, value = tok.split("=", 1)
+            if field.lower() not in ("host", "model", "keyenv"):
+                return None
+            changes[field.lower()] = value
+        return {"action": "edit", "name": tokens[1], "changes": changes}
     if head == "add":
         if len(tokens) < 3 or len(tokens) > 5:
             return None
@@ -101,6 +120,9 @@ def main() -> None:
     parser.add_argument("--list-models", action="store_true",
                         help="List every local model Ogun can find (Ollama library, running servers, GGUF files, "
                              "Hugging Face cache, training exports) with the command that runs each, then exit.")
+    parser.add_argument("--list-providers", action="store_true",
+                        help="List all providers (built-ins and custom providers from config/providers.json / "
+                             "$OGUN_CUSTOM_PROVIDERS) with their hosts and default models, then exit.")
     parser.add_argument("--no-tools", action="store_true", help="Disable tool execution.")
     parser.add_argument("--unload", action="store_true",
                         help="Unload the model from Ollama (free its GPU memory) and exit.")
@@ -111,6 +133,11 @@ def main() -> None:
     args = parser.parse_args()
     args.model_explicit = args.model            # only a model typed on the command line is exempt from the 'does it fit' check
     args.model = args.model or MODEL_NAME
+
+    # --list-providers is read-only: no provider needs to resolve, no connection check.
+    if args.list_providers:
+        print(provider_listing())
+        sys.exit(0)
 
     provider_target = resolve_provider_target(args.provider or LLM_PROVIDER, args.host)
     if provider_target is None:
@@ -265,12 +292,12 @@ def main() -> None:
             provider_cmd = parse_provider_command(user_input)
             if provider_cmd is not None:
                 if provider_cmd["action"] == "status":
-                    _customs = sorted(load_custom_providers())
-                    _custom_txt = f" Custom: {', '.join(_customs)}." if _customs else ""
-                    print(f"\n{session.status()}\nProviders: ollama | openai | llama.cpp | lmstudio.{_custom_txt} "
-                          "Switch with /provider <name> [host], e.g. /provider lmstudio or /provider openai http://127.0.0.1:8000\n"
-                          "Define a custom provider here: /provider add <name> <host> [model] [keyenv=VAR]  |  "
-                          "remove one: /provider remove <name>")
+                    print(f"\n{session.status()}\n"
+                          "Switch with /provider <name> [host]  |  /provider list shows every provider  |  "
+                          "define one here: /provider add <name> <host> [model] [keyenv=VAR]  |  "
+                          "/provider edit <name> [field=value]  |  /provider remove <name>")
+                elif provider_cmd["action"] == "list":
+                    print(f"\n{provider_listing(session.provider, session.label)}")
                 elif provider_cmd["action"] == "switch":
                     _ok, _msg = session.switch_provider(provider_cmd["name"], provider_cmd["host"])
                     engine.client = session.client
@@ -278,6 +305,10 @@ def main() -> None:
                 elif provider_cmd["action"] == "add":
                     _ok, _msg = session.add_provider(provider_cmd["name"], provider_cmd["host"],
                                                      provider_cmd["model"], provider_cmd["api_key_env"])
+                    engine.client = session.client
+                    print(f"\n{_msg}")
+                elif provider_cmd["action"] == "edit":
+                    _ok, _msg = session.edit_provider(provider_cmd["name"], provider_cmd["changes"])
                     engine.client = session.client
                     print(f"\n{_msg}")
                 else:  # remove

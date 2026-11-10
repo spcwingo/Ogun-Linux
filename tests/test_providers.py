@@ -542,6 +542,81 @@ def test_parse_provider_command() -> None:
     assert parse("/provider remove") is None
     assert parse("/provider a b c") is None
     assert parse("what is a /provider") is None
+    assert parse("/provider list") == {"action": "list"}
+    assert parse("/provider list extra") is None
+    assert parse("/provider edit bigbox") == {"action": "edit", "name": "bigbox", "changes": {}}
+    edit = parse("/provider edit bigbox host=http://h:9 model=m2 keyenv=K1")
+    assert edit["changes"] == {"host": "http://h:9", "model": "m2", "keyenv": "K1"}, edit
+    assert parse("/provider edit") is None
+    assert parse("/provider edit bigbox host") is None       # field without '='
+    assert parse("/provider edit bigbox bogus=1") is None    # unknown field
+
+
+def test_provider_listing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        cfg.write_text(json.dumps({"filebox": {"host": "http://10.0.0.1:8000", "model": "fm", "api_key_env": "FB_KEY"}}),
+                       encoding="utf-8")
+        env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"envbox": {"host": "http://10.0.0.2:8000"}})}
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), patch.dict(os.environ, env):
+            text = providers.provider_listing(active_kind="openai", active_display="filebox")
+            builtin = providers.provider_listing(active_kind="ollama", active_display="Ollama")
+    assert "* filebox" in text and "model=fm" in text and "keyenv=FB_KEY" in text, text
+    assert "(custom, config/providers.json)" in text and "(custom, $OGUN_CUSTOM_PROVIDERS)" in text
+    assert "envbox" in text and "ollama" in text and "lmstudio" in text
+    assert "* ollama" in builtin, builtin
+    assert "* filebox" not in builtin
+
+
+def test_edit_custom_provider() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), \
+             patch.dict(os.environ, {"OGUN_CUSTOM_PROVIDERS": ""}):
+            providers.save_custom_provider("box", "http://10.0.0.1:8000", model="m1")
+            ok, msg = providers.edit_custom_provider("box", {})
+            assert ok and "host=http://10.0.0.1:8000" in msg and "model=m1" in msg, msg
+            ok, msg = providers.edit_custom_provider("box", {"host": "http://10.0.0.7:9000/"})
+            assert ok and load_custom_providers()["box"]["host"] == "http://10.0.0.7:9000", msg
+            ok, _ = providers.edit_custom_provider("box", {"model": ""})
+            assert ok and "model" not in load_custom_providers()["box"], "empty model= clears it"
+            ok, _ = providers.edit_custom_provider("box", {"keyenv": "BOX_KEY"})
+            assert load_custom_providers()["box"]["api_key_env"] == "BOX_KEY"
+            ok, _ = providers.edit_custom_provider("box", {"keyenv": ""})
+            assert "api_key_env" not in load_custom_providers()["box"]
+            ok, msg = providers.edit_custom_provider("box", {"host": "not-a-url"})
+            assert not ok and load_custom_providers()["box"]["host"] == "http://10.0.0.7:9000", "bad host rejected, definition unchanged"
+            ok, _ = providers.edit_custom_provider("ghost", {"host": "http://x:1"})
+            assert not ok
+            ok, msg = providers.save_custom_provider("list", "http://x:1")
+            assert not ok and "subcommand" in msg, msg
+
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"envbox": {"host": "http://10.0.0.2:8000"}})}
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", Path(tmp) / "providers.json"), patch.dict(os.environ, env):
+            ok, msg = providers.edit_custom_provider("envbox", {"host": "http://10.0.0.3:8000"})
+            assert not ok and "OGUN_CUSTOM_PROVIDERS" in msg, msg
+
+
+def test_session_edit_provider_live() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "providers.json"
+        session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+        with patch.object(providers, "CUSTOM_PROVIDERS_PATH", cfg), \
+             patch.dict(os.environ, {"OGUN_CUSTOM_PROVIDERS": ""}), \
+             patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+            ok, msg = session.add_provider("newbox", "http://127.0.0.1:18080")
+            assert ok and session.label == "newbox", msg
+            ok, msg = session.edit_provider("newbox", {"model": "srv-2"})
+            assert ok and "Applied live" in msg and session.model == "srv-2", msg
+            assert load_custom_providers()["newbox"]["model"] == "srv-2"
+            # editing a different provider leaves the session alone
+            session.add_provider("otherbox", "http://127.0.0.1:18080")  # switches to otherbox
+            ok, msg = session.edit_provider("newbox", {"model": "srv-1"})
+            assert ok and "Applied live" not in msg and session.label == "otherbox", msg
+            # editing the ACTIVE provider to an unreachable host: edit stands, old client keeps serving
+            ok, msg = session.edit_provider("otherbox", {"host": "http://127.0.0.1:1"})
+            assert ok and "reconnecting failed" in msg and session.host == "http://127.0.0.1:18080", msg
 
 
 def main() -> int:
@@ -570,6 +645,9 @@ def main() -> int:
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,
         test_parse_provider_command,
+        test_provider_listing,
+        test_edit_custom_provider,
+        test_session_edit_provider_live,
     ]
     for t in tests:
         t()

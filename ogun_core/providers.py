@@ -641,6 +641,11 @@ def _write_custom_providers_file(data: Dict[str, Any]) -> None:
     CUSTOM_PROVIDERS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+#: Words that are /provider subcommands; a custom provider with one of these names could never be
+#: selected, so they are rejected at definition time.
+_RESERVED_PROVIDER_NAMES = {"add", "remove", "rm", "delete", "list", "edit"}
+
+
 def validate_custom_provider(name: str, host: str) -> Optional[str]:
     """An error string when a custom provider name/host is unusable, else None."""
     cleaned = str(name or "").strip()
@@ -648,6 +653,8 @@ def validate_custom_provider(name: str, host: str) -> Optional[str]:
         return f"'{name}' is not a usable provider name (one word, no slashes)."
     if normalize_provider(cleaned) is not None:
         return f"'{cleaned}' is a built-in provider name; pick a different name."
+    if cleaned.lower() in _RESERVED_PROVIDER_NAMES:
+        return f"'{cleaned}' is a /provider subcommand word; pick a different name."
     if not str(host or "").strip().lower().startswith(("http://", "https://")):
         return f"'{host}' is not a URL (it must start with http:// or https://)."
     return None
@@ -690,6 +697,96 @@ def remove_custom_provider(name: str) -> Tuple[bool, str]:
     except Exception as exc:
         return False, f"Could not update {CUSTOM_PROVIDERS_PATH} ({exc})."
     return True, f"Removed custom provider '{file_key}'."
+
+
+def _custom_provider_sources() -> Dict[str, str]:
+    """For each custom provider name (lowercased): where it is defined, 'file' or 'env'
+    (env wins, matching load_custom_providers' merge order)."""
+    sources = {str(k).strip().lower(): "file" for k in _read_custom_providers_file()}
+    raw = os.environ.get("OGUN_CUSTOM_PROVIDERS", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                for k in data:
+                    sources[str(k).strip().lower()] = "env"
+        except Exception:
+            pass
+    return sources
+
+
+def provider_listing(active_kind: Optional[str] = None, active_display: Optional[str] = None) -> str:
+    """A readable list of every provider: built-ins with their effective hosts, customs with
+    host/model/key reference and where each is defined. The active one is marked with '*'."""
+    def mark(is_active: bool) -> str:
+        return "*" if is_active else " "
+
+    lines = ["Providers (* = active):"]
+    for kind in ("ollama", "openai", "llama.cpp", "lmstudio"):
+        host = resolve_provider_host(kind, None)
+        is_active = kind == active_kind and (active_display in (None, PROVIDER_LABELS.get(kind), kind))
+        lines.append(f" {mark(is_active)} {kind:12s} {host}  (built-in)")
+    sources = _custom_provider_sources()
+    customs = load_custom_providers()
+    for name in sorted(customs):
+        definition = customs[name]
+        extras = []
+        if definition.get("model"):
+            extras.append(f"model={definition['model']}")
+        if definition.get("api_key_env"):
+            extras.append(f"keyenv={definition['api_key_env']}")
+        source = "config/providers.json" if sources.get(name) == "file" else "$OGUN_CUSTOM_PROVIDERS"
+        is_active = active_display is not None and name == active_display.strip().lower()
+        lines.append(f" {mark(is_active)} {name:12s} {definition['host']}"
+                     f"{'  ' + '  '.join(extras) if extras else ''}  (custom, {source})")
+    if not customs:
+        lines.append("   (no custom providers defined; add one with /provider add <name> <host> [model])")
+    return "\n".join(lines)
+
+
+def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[bool, str]:
+    """Edit fields of a file-defined custom provider. `changes` maps host/model/keyenv to a new
+    value; an empty string clears model/keyenv (host cannot be cleared). With no changes, just
+    reports the current definition. Env-defined providers cannot be edited here. Never raises."""
+    key = str(name or "").strip()
+    data = _read_custom_providers_file()
+    file_key = next((k for k in data if k.strip().lower() == key.lower()), None)
+    if file_key is None:
+        if get_custom_provider(key) is not None:
+            return False, (f"'{key}' is defined by $OGUN_CUSTOM_PROVIDERS, not in {CUSTOM_PROVIDERS_PATH}; "
+                           "change the environment variable to edit it.")
+        return False, f"No custom provider named '{key}'."
+
+    definition = dict(data[file_key])
+    if not changes:
+        shown = ", ".join(f"{k}={v}" for k, v in definition.items())
+        return True, f"'{file_key}': {shown}. Edit with /provider edit {file_key} host=<url> | model=<id> | keyenv=<VAR> (empty value clears model/keyenv)."
+
+    if "host" in changes:
+        new_host = (changes["host"] or "").strip()
+        error = validate_custom_provider(file_key, new_host)
+        if error:
+            return False, error
+        definition["host"] = new_host.rstrip("/")
+    if "model" in changes:
+        value = (changes["model"] or "").strip()
+        if value:
+            definition["model"] = value
+        else:
+            definition.pop("model", None)
+    if "keyenv" in changes:
+        value = (changes["keyenv"] or "").strip()
+        if value:
+            definition["api_key_env"] = value
+        else:
+            definition.pop("api_key_env", None)
+    try:
+        data[file_key] = definition
+        _write_custom_providers_file(data)
+    except Exception as exc:
+        return False, f"Could not update {CUSTOM_PROVIDERS_PATH} ({exc})."
+    shown = ", ".join(f"{k}={v}" for k, v in definition.items())
+    return True, f"Updated '{file_key}': {shown}."
 
 
 def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -829,16 +926,17 @@ class ProviderSession:
         self.client.model = name
 
     # -- Switches ------------------------------------------------------------
-    def switch_provider(self, name: str, new_host: Optional[str] = None) -> Tuple[bool, str]:
+    def switch_provider(self, name: str, new_host: Optional[str] = None, force: bool = False) -> Tuple[bool, str]:
         """Switch provider (built-in or custom name, optionally a new host) without restarting.
-        (ok, message); never raises."""
+        force=True rebuilds the client even when the target looks identical (used after an edit
+        changed the stored definition). (ok, message); never raises."""
         target = resolve_provider_target(name, new_host)
         if target is None:
             customs = ", ".join(sorted(load_custom_providers())) or "none defined"
             return False, (f"Unknown provider '{name}'. Built-ins: ollama, openai, llama.cpp, lmstudio. "
                            f"Custom providers: {customs}.")
         kind = target["kind"]
-        if kind == self.provider and target["display"] == self.label and not new_host:
+        if kind == self.provider and target["display"] == self.label and not new_host and not force:
             return True, f"Already using {self.label} at {self.host} with model '{self.model}'."
         host = target["host"]
         model = target["model"] or self.model
@@ -885,7 +983,7 @@ class ProviderSession:
         ok, msg = save_custom_provider(name, host, model=model, api_key_env=api_key_env)
         if not ok:
             return False, msg
-        switched, switch_msg = self.switch_provider(str(name).strip())
+        switched, switch_msg = self.switch_provider(str(name).strip(), force=True)
         if switched:
             return True, f"{msg} {switch_msg}"
         return True, f"{msg} It is saved for next time, but could not be used right now: {switch_msg}"
@@ -894,6 +992,20 @@ class ProviderSession:
         """/provider remove: delete a saved custom provider. The active session is untouched
         even when the removed provider is the one in use (it just stops being defined)."""
         return remove_custom_provider(name)
+
+    def edit_provider(self, name: str, changes: Dict[str, Optional[str]]) -> Tuple[bool, str]:
+        """/provider edit: change a saved custom provider's host/model/keyenv. When the edited
+        provider is the one in use, the new settings are applied live by reconnecting; if the
+        new endpoint is unreachable the edit still stands and the old client keeps serving."""
+        ok, msg = edit_custom_provider(name, changes)
+        if not ok or not changes:
+            return ok, msg
+        if self.label.strip().lower() != str(name).strip().lower():
+            return True, msg
+        applied, switch_msg = self.switch_provider(str(name).strip(), force=True)
+        if applied:
+            return True, f"{msg} Applied live: now using {self.label} at {self.host}, model '{self.model}'."
+        return True, f"{msg} Saved, but reconnecting failed, so the previous settings are still in use: {switch_msg}"
 
     def switch_model(self, value: str) -> Tuple[bool, str]:
         """Switch model within the current provider. Accepts a model tag/id or a .gguf path.

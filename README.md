@@ -62,6 +62,7 @@ Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels
 | `--provider NAME` | where the model runs: `ollama` (default), `openai` (any OpenAI-compatible local server), `llama.cpp`, `lmstudio` |
 | `--host URL` | the inference server's base URL (default: the provider's usual local address) |
 | `--list-models` | list every local model Ogun can find, with the command that runs each, then exit |
+| `--list-providers` | list all providers (built-ins and custom) with their hosts and default models, then exit |
 | `--no-tools` | plain chat, no tool execution |
 | `--vram max\|shared\|cpu` | start with a fixed GPU profile (turns hardware auto-tuning off for this run) |
 | `--hardware-info` | show the detected hardware and the settings Ogun would use, then exit (`--json` for machine-readable) |
@@ -154,6 +155,8 @@ Ollama is the default, but Ogun can chat with models served by the other local t
 | `/provider openai http://127.0.0.1:8000` | switch to any OpenAI-compatible server (llama-server, vLLM, HF TGI, Unsloth Studio, ...) |
 | `/provider ollama` | switch back to Ollama |
 | `/provider add bigbox http://192.168.1.50:8000 qwen3-32b` | define a custom provider **from inside chat**: saved to `config/providers.json`, then switched to (add `keyenv=VAR` to name an env var holding its API key) |
+| `/provider list` | list every provider — built-ins and customs — with host, default model, key reference, where it's defined, and which one is active |
+| `/provider edit bigbox model=qwen3-8b` | change one field of a saved provider (`host=`, `model=`, `keyenv=`; empty value clears model/keyenv). `/provider edit bigbox` alone shows its definition. Editing the active provider applies live |
 | `/provider remove bigbox` | delete a saved custom provider |
 | `/model llama3.1:8b` | switch model: an Ollama tag, the id a server is serving, or a path to a `.gguf` file |
 | `/model ~/models/my-finetune-Q4_K_M.gguf` | run a GGUF directly: Ogun launches `llama-server` for it (provider `llama.cpp`) or imports it into Ollama (provider `ollama`) |
