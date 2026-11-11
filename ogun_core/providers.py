@@ -54,6 +54,9 @@ _PROVIDER_ALIASES = {
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
     "lm_studio": "lmstudio",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "messages": "anthropic",
 }
 
 #: Base URLs used when the user does not pass --host / $OGUN_LLM_HOST.
@@ -61,6 +64,7 @@ PROVIDER_DEFAULT_HOSTS = {
     "openai": "http://127.0.0.1:8080",
     "llama.cpp": "http://127.0.0.1:8080",
     "lmstudio": "http://127.0.0.1:1234",
+    "anthropic": "https://api.anthropic.com",
 }
 
 #: Friendly label per provider, for banners and error messages.
@@ -69,6 +73,7 @@ PROVIDER_LABELS = {
     "openai": "OpenAI-compatible server",
     "llama.cpp": "llama.cpp (llama-server)",
     "lmstudio": "LM Studio",
+    "anthropic": "Anthropic Messages API",
 }
 
 
@@ -318,6 +323,307 @@ class OpenAICompatClient:
 
 
 # ---------------------------------------------------------------------------
+# Anthropic Messages API client (Anthropic itself, and Anthropic-shaped gateways
+# such as Free Claude Code on http://127.0.0.1:8082)
+# ---------------------------------------------------------------------------
+def _to_anthropic_messages(messages: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    """Translate Ogun's OpenAI-shaped history to Anthropic's (system, messages).
+
+    System turns become the top-level system text; assistant tool_calls become tool_use
+    blocks; tool results become tool_result blocks inside a user turn. Consecutive
+    same-role turns are merged (Anthropic expects alternating roles). Tool-call ids are
+    preserved when the producing client supplied them and synthesized deterministically
+    (toolu_1, toolu_2, ... in history order) when it did not, so results always match.
+    """
+    system_parts: List[str] = []
+    out: List[Dict[str, Any]] = []
+    pending_ids: List[str] = []
+    counter = 0
+
+    def push(role: str, block: Dict[str, Any]) -> None:
+        if out and out[-1]["role"] == role:
+            out[-1]["content"].append(block)
+        else:
+            out.append({"role": role, "content": [block]})
+
+    for msg in messages or []:
+        role = str(msg.get("role") or "user")
+        content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str) and content:
+                system_parts.append(content)
+            continue
+        if role == "tool":
+            tool_id = pending_ids.pop(0) if pending_ids else "toolu_unknown"
+            push("user", {"type": "tool_result", "tool_use_id": tool_id,
+                          "content": content if isinstance(content, str) else json.dumps(content)})
+            continue
+        if role == "assistant":
+            if isinstance(content, str) and content:
+                push("assistant", {"type": "text", "text": content})
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or tc.get("name") or ""
+                args = fn.get("arguments", tc.get("arguments", {}))
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {"raw": args}
+                counter += 1
+                tool_id = str(tc.get("id") or f"toolu_{counter}")
+                pending_ids.append(tool_id)
+                push("assistant", {"type": "tool_use", "id": tool_id, "name": name,
+                                   "input": args if isinstance(args, dict) else {"value": args}})
+            continue
+        # user (and anything else) becomes a user text turn
+        if isinstance(content, str):
+            if content:
+                push("user", {"type": "text", "text": content})
+        elif content is not None:
+            push("user", {"type": "text", "text": json.dumps(content)})
+    return "\n\n".join(system_parts), out
+
+
+def _to_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """OpenAI function schemas -> Anthropic tool definitions."""
+    out: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        fn = tool.get("function") or tool
+        name = fn.get("name")
+        if not name:
+            continue
+        schema = fn.get("input_schema") or fn.get("parameters") or {"type": "object", "properties": {}}
+        out.append({"name": str(name), "description": str(fn.get("description") or ""),
+                    "input_schema": schema})
+    return out
+
+
+def _map_anthropic_options(options: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate the shared llm_options payload to Anthropic fields.
+
+    max_tokens is REQUIRED by the Messages API (falls back to 4096). The API accepts
+    only one of temperature / top_p, so top_p is dropped when a temperature is set.
+    """
+    mapped = _map_openai_options(options)
+    out: Dict[str, Any] = {"max_tokens": int(mapped.get("max_tokens") or 4096)}
+    if mapped.get("temperature") is not None:
+        out["temperature"] = mapped["temperature"]
+    elif mapped.get("top_p") is not None:
+        out["top_p"] = mapped["top_p"]
+    if mapped.get("top_k") is not None:
+        out["top_k"] = mapped["top_k"]
+    stop = mapped.get("stop")
+    if stop:
+        out["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+    return out
+
+
+class AnthropicMessagesClient:
+    """Client for Anthropic's Messages API and Anthropic-shaped gateways (e.g. Free
+    Claude Code), with OllamaClient's interface. Pure urllib, like the OpenAI client."""
+
+    def __init__(
+        self,
+        host: str = PROVIDER_DEFAULT_HOSTS["anthropic"],
+        model: str = MODEL_NAME,
+        timeout: Optional[float] = None,
+        label: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> None:
+        self.host = host.rstrip("/")
+        self.model = model
+        self.label = label or PROVIDER_LABELS["anthropic"]
+        self.api_key = api_key or None
+        self._custom_timeout = timeout is not None
+        self.timeout = timeout if self._custom_timeout else get_request_timeout()
+
+    def get_effective_timeout(self) -> float:
+        return self.timeout if self._custom_timeout else get_request_timeout()
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _request_json(self, path: str, payload: Optional[Dict[str, Any]] = None,
+                      timeout: float = 5.0) -> Any:
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(
+            f"{self.host}{path}",
+            data=data,
+            headers=self._headers(),
+            method="POST" if data is not None else "GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _http_failure(self, exc: urllib.error.HTTPError) -> RuntimeError:
+        detail = _http_error_detail(exc)
+        msg = f"HTTP {exc.code} {exc.reason} from {self.label} at {self.host}"
+        if detail:
+            msg += f" — server said: {detail}"
+        return RuntimeError(msg)
+
+    def list_models(self) -> List[str]:
+        """Model ids advertised at GET /v1/models ([] when unreachable)."""
+        try:
+            data = self._request_json("/v1/models", timeout=5.0)
+            return [str(m.get("id")) for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+        except Exception:
+            return []
+
+    def check_connection(self) -> Tuple[bool, str]:
+        try:
+            data = self._request_json("/v1/models", timeout=5.0)
+            models = [m.get("id") for m in data.get("data", []) if isinstance(m, dict)]
+            return True, f"Connected to {self.label} at {self.host} ({len(models)} model(s) available)."
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                key_note = ("the key it was given was rejected" if self.api_key
+                            else "no API key was given")
+                return (
+                    False,
+                    f"{self.label} at {self.host} refused the request (HTTP {exc.code} Unauthorized): "
+                    f"the server requires an API key and {key_note}. Provide one with $OGUN_LLM_API_KEY, "
+                    "or save this endpoint as a custom provider with its key "
+                    "(/provider add <name> <host> [model] key=<api-key> type=anthropic).",
+                )
+            detail = _http_error_detail(exc)
+            return False, f"{self.label} at {self.host} returned HTTP {exc.code}." + (
+                f" Server said: {detail}" if detail else "")
+        except Exception as exc:
+            return (
+                False,
+                f"Cannot connect to {self.label} at {self.host} ({exc}). "
+                "Start that server first, or check the --host URL.",
+            )
+
+    def unload(self) -> Dict[str, Any]:
+        return {
+            "unloaded": False,
+            "model": self.model,
+            "detail": f"{self.label} manages its own model memory; unload the model in that app to free the GPU.",
+        }
+
+    # -- Chat --------------------------------------------------------------
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        options: Optional[Dict[str, Any]] = None,
+        stream: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        system, conv = _to_anthropic_messages(messages)
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": conv,
+            **_map_anthropic_options(llm_options(**(options or {}))),
+        }
+        if system:
+            payload["system"] = system
+        anthropic_tools = _to_anthropic_tools(tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+        eff_timeout = self.get_effective_timeout()
+        if stream or on_token is not None:
+            return self._chat_stream(payload, eff_timeout, on_token)
+        try:
+            data = self._request_json("/v1/messages", payload, timeout=eff_timeout)
+        except urllib.error.HTTPError as he:
+            raise self._http_failure(he) from he
+        except urllib.error.URLError as ue:
+            if "timed out" in str(ue).lower():
+                raise TimeoutError(str(ue))
+            raise
+        return self._parse_message(data)
+
+    @staticmethod
+    def _parse_message(data: Dict[str, Any]) -> Dict[str, Any]:
+        texts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                texts.append(str(block.get("text") or ""))
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id") or "",
+                    "type": "function",
+                    "function": {"name": block.get("name") or "",
+                                 "arguments": block.get("input") or {}},
+                })
+        return {"content": "".join(texts), "tool_calls": tool_calls}
+
+    def _chat_stream(self, payload: Dict[str, Any], eff_timeout: float,
+                     on_token: Optional[Callable[[str], None]]) -> Dict[str, Any]:
+        payload = dict(payload, stream=True)
+        req = urllib.request.Request(
+            f"{self.host}/v1/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        texts: List[str] = []
+        blocks: Dict[int, Dict[str, Any]] = {}
+        try:
+            with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    etype = event.get("type")
+                    idx = int(event.get("index", 0))
+                    if etype == "content_block_start":
+                        block = event.get("content_block") or {}
+                        blocks[idx] = {"type": block.get("type"), "id": block.get("id") or "",
+                                       "name": block.get("name") or "", "args": ""}
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        slot = blocks.setdefault(idx, {"type": "text", "id": "", "name": "", "args": ""})
+                        if delta.get("type") == "text_delta":
+                            piece = str(delta.get("text") or "")
+                            if piece:
+                                texts.append(piece)
+                                if on_token is not None:
+                                    on_token(piece)
+                        elif delta.get("type") == "input_json_delta":
+                            slot["args"] += str(delta.get("partial_json") or "")
+                    elif etype == "error":
+                        err = event.get("error") or {}
+                        raise RuntimeError(f"Streaming error from {self.label}: "
+                                           f"{err.get('message') or err.get('type') or 'unknown error'}")
+        except urllib.error.HTTPError as he:
+            raise self._http_failure(he) from he
+        except urllib.error.URLError as ue:
+            if "timed out" in str(ue).lower():
+                raise TimeoutError(str(ue))
+            raise
+        tool_calls: List[Dict[str, Any]] = []
+        for idx in sorted(blocks):
+            slot = blocks[idx]
+            if slot.get("type") != "tool_use":
+                continue
+            args: Any = slot["args"]
+            if isinstance(args, str) and args:
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {"raw": args}
+            tool_calls.append({"id": slot["id"], "type": "function",
+                               "function": {"name": slot["name"], "arguments": args or {}}})
+        return {"content": "".join(texts), "tool_calls": tool_calls}
+
+
+# ---------------------------------------------------------------------------
 # llama.cpp server management
 # ---------------------------------------------------------------------------
 def find_llama_server_binary() -> Optional[str]:
@@ -560,6 +866,12 @@ def discover_local_models(ollama_host: str = OLLAMA_HOST, probe_servers: bool = 
             client = OpenAICompatClient(host=host, label=label)
             for mid in client.list_models():
                 out.append({"name": mid, "kind": "server", "detail": host, "size_gb": 0.0})
+        # 2b. An Anthropic-shaped gateway (Free Claude Code) on its usual port: it answers
+        # /v1/models like the others, but chat goes through the Anthropic Messages API.
+        fcc = AnthropicMessagesClient(host="http://127.0.0.1:8082", label="Free Claude Code")
+        for mid in fcc.list_models():
+            out.append({"name": mid, "kind": "anthropic-server",
+                        "detail": "http://127.0.0.1:8082", "size_gb": 0.0})
 
     # 3. GGUF files and HF folders in the search dirs + the HF cache
     seen_paths: set = set()
@@ -586,6 +898,7 @@ def discover_local_models(ollama_host: str = OLLAMA_HOST, probe_servers: bool = 
 _KIND_HINTS = {
     "ollama": "run: --provider ollama --model {name}",
     "server": "run: --provider openai --host {detail} --model {name}",
+    "anthropic-server": "run: --provider anthropic --host {detail} --model {name}",
     "gguf": "run: --provider llama.cpp --model {detail}  (or --provider ollama --model {detail} to import it)",
     "huggingface": "serve it (vLLM / Unsloth Studio / LM Studio) then --provider openai, or export a GGUF",
 }
@@ -620,6 +933,10 @@ def create_client(provider: str, model: str = MODEL_NAME, host: Optional[str] = 
         from ogun_core.engine import OllamaClient
         return OllamaClient(host=host or OLLAMA_HOST, model=model, timeout=timeout)
     base = host or PROVIDER_DEFAULT_HOSTS.get(provider, PROVIDER_DEFAULT_HOSTS["openai"])
+    if provider == "anthropic":
+        return AnthropicMessagesClient(host=base, model=model, timeout=timeout,
+                                       label=label or PROVIDER_LABELS["anthropic"],
+                                       api_key=api_key)
     return OpenAICompatClient(host=base, model=model, timeout=timeout,
                               label=label or PROVIDER_LABELS.get(provider, "OpenAI-compatible server"),
                               api_key=api_key)
@@ -651,9 +968,12 @@ def load_custom_providers() -> Dict[str, Dict[str, Any]]:
         {"host": "http://192.168.1.50:8000",          # required
          "model": "qwen3-32b",                        # optional default model
          "api_key_env": "MY_SERVER_KEY",              # optional: env var holding a Bearer key
-         "api_key": "sk-..."}                         # optional: the Bearer key itself, stored
+         "api_key": "sk-...",                         # optional: the Bearer key itself, stored
                                                       # in the file (local use; file is chmod 600
                                                       # whenever any key is stored)
+         "type": "anthropic"}                         # optional wire API: "anthropic" for
+                                                      # Anthropic-shaped gateways (Free Claude
+                                                      # Code); default is OpenAI-compatible
 
     Keys are the provider names as typed (matched case-insensitively). Never raises: a malformed
     file or variable simply contributes nothing.
@@ -740,7 +1060,8 @@ def validate_custom_provider(name: str, host: str) -> Optional[str]:
 
 def save_custom_provider(name: str, host: str, model: Optional[str] = None,
                          api_key_env: Optional[str] = None,
-                         api_key: Optional[str] = None) -> Tuple[bool, str]:
+                         api_key: Optional[str] = None,
+                         api_type: Optional[str] = None) -> Tuple[bool, str]:
     """Define (or overwrite) a custom provider in config/providers.json. Never raises."""
     error = validate_custom_provider(name, host)
     if error:
@@ -752,6 +1073,12 @@ def save_custom_provider(name: str, host: str, model: Optional[str] = None,
         definition["api_key_env"] = str(api_key_env).strip()
     if api_key:
         definition["api_key"] = str(api_key).strip()
+    if api_type:
+        kind = str(api_type).strip().lower()
+        if kind in ("anthropic", "claude"):
+            definition["type"] = "anthropic"
+        elif kind != "openai":
+            return False, f"Unknown provider type '{api_type}' (use 'openai' or 'anthropic')."
     try:
         data = _read_custom_providers_file()
         data[str(name).strip()] = definition
@@ -819,6 +1146,8 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
             extras.append(f"keyenv={env_name}" + ("" if os.environ.get(env_name) else " (NOT SET)"))
         if definition.get("api_key"):
             extras.append("key=stored")
+        if str(definition.get("type") or "").strip().lower() in ("anthropic", "claude"):
+            extras.append("type=anthropic")
         source = "config/providers.json" if sources.get(name) == "file" else "$OGUN_CUSTOM_PROVIDERS"
         is_active = active_display is not None and name == active_display.strip().lower()
         lines.append(f" {mark(is_active)} {name:12s} {definition['host']}"
@@ -845,7 +1174,7 @@ def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[
     definition = dict(data[file_key])
     if not changes:
         return True, (f"'{file_key}': {_describe_definition(definition)}. Edit with /provider edit {file_key} "
-                      "host=<url> | model=<id> | keyenv=<VAR> | key=<api-key> (empty value clears model/keyenv/key).")
+                      "host=<url> | model=<id> | keyenv=<VAR> | key=<api-key> | type=<openai|anthropic> (empty value clears model/keyenv/key).")
 
     if "host" in changes:
         new_host = (changes["host"] or "").strip()
@@ -871,6 +1200,14 @@ def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[
             definition["api_key"] = value
         else:
             definition.pop("api_key", None)
+    if "type" in changes:
+        value = (changes["type"] or "").strip().lower()
+        if value in ("anthropic", "claude"):
+            definition["type"] = "anthropic"
+        elif value in ("openai", ""):
+            definition.pop("type", None)
+        else:
+            return False, f"Unknown provider type '{changes['type']}' (use 'openai' or 'anthropic')."
     try:
         data[file_key] = definition
         _write_custom_providers_file(data)
@@ -906,7 +1243,10 @@ def resolve_provider_target(name: Optional[str], new_host: Optional[str] = None)
         api_key = os.environ.get(str(key_env)) or None
     if not api_key and definition.get("api_key"):
         api_key = str(definition["api_key"])
-    return {"kind": "openai", "host": (new_host or str(definition["host"])).rstrip("/"),
+    # A definition's "type" picks the wire API: "anthropic" for Anthropic-shaped gateways
+    # (Free Claude Code et al.); anything else is an OpenAI-compatible endpoint.
+    kind = "anthropic" if str(definition.get("type") or "").strip().lower() in ("anthropic", "claude") else "openai"
+    return {"kind": kind, "host": (new_host or str(definition["host"])).rstrip("/"),
             "model": definition.get("model"), "api_key": api_key,
             "key_env": str(key_env) if key_env else None,
             "display": str(name).strip()}
@@ -1037,7 +1377,7 @@ class ProviderSession:
         target = resolve_provider_target(name, new_host)
         if target is None:
             customs = ", ".join(sorted(load_custom_providers())) or "none defined"
-            return False, (f"Unknown provider '{name}'. Built-ins: ollama, openai, llama.cpp, lmstudio. "
+            return False, (f"Unknown provider '{name}'. Built-ins: ollama, openai, llama.cpp, lmstudio, anthropic. "
                            f"Custom providers: {customs}.")
         kind = target["kind"]
         if kind == self.provider and target["display"] == self.label and not new_host and not force:
@@ -1089,12 +1429,13 @@ class ProviderSession:
 
     def add_provider(self, name: str, host: str, model: Optional[str] = None,
                      api_key_env: Optional[str] = None,
-                     api_key: Optional[str] = None) -> Tuple[bool, str]:
+                     api_key: Optional[str] = None,
+                     api_type: Optional[str] = None) -> Tuple[bool, str]:
         """Define a custom provider from inside chat (/provider add): save it to
         config/providers.json, then switch to it. An unreachable endpoint is still saved;
         the session just stays on the current provider. (ok, message); never raises."""
         ok, msg = save_custom_provider(name, host, model=model, api_key_env=api_key_env,
-                                       api_key=api_key)
+                                       api_key=api_key, api_type=api_type)
         if not ok:
             return False, msg
         switched, switch_msg = self.switch_provider(str(name).strip(), force=True)

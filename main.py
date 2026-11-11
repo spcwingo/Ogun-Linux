@@ -42,8 +42,8 @@ def parse_provider_command(text: str):
     """Parse a /provider command line into an action dict, or None when it is not a well-formed command.
 
     Forms: /provider | /provider list | /provider <name> [host]
-           | /provider add <name> <host> [model] [keyenv=VAR] [key=KEY]
-           | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>] [key=<KEY>]
+           | /provider add <name> <host> [model] [keyenv=VAR] [key=KEY] [type=openai|anthropic]
+           | /provider edit <name> [host=<url>] [model=<id>] [keyenv=<VAR>] [key=<KEY>] [type=<openai|anthropic>]
            | /provider remove <name>
 
     The add/edit forms also accept named fields in any order (host=..., model=...,
@@ -74,14 +74,14 @@ def parse_provider_command(text: str):
             field = field.lower()
             if field in ("api-key", "apikey"):
                 field = "key"
-            if field not in ("host", "model", "keyenv", "key"):
+            if field not in ("host", "model", "keyenv", "key", "type"):
                 return None
             changes[field] = value
         return {"action": "edit", "name": tokens[1], "changes": changes}
     if head == "add":
-        if len(tokens) < 3 or len(tokens) > 7:
+        if len(tokens) < 3 or len(tokens) > 8:
             return None
-        host, model, keyenv, key = None, None, None, None
+        host, model, keyenv, key, api_type = None, None, None, None, None
         for tok in tokens[2:]:
             low = tok.lower()
             if low.startswith("keyenv="):
@@ -90,6 +90,8 @@ def parse_provider_command(text: str):
                 key = tok.split("=", 1)[1] or None
             elif low.startswith("model="):
                 model = tok.split("=", 1)[1] or None
+            elif low.startswith("type="):
+                api_type = tok.split("=", 1)[1] or None
             elif low.startswith("host="):
                 host = tok.split("=", 1)[1] or None
             elif host is None:
@@ -101,7 +103,7 @@ def parse_provider_command(text: str):
         if not host:
             return None
         return {"action": "add", "name": tokens[1], "host": host, "model": model,
-                "api_key_env": keyenv, "api_key": key}
+                "api_key_env": keyenv, "api_key": key, "api_type": api_type}
     if head in ("remove", "rm", "delete"):
         if len(tokens) != 2:
             return None
@@ -129,10 +131,11 @@ def main() -> None:
                         "With a non-Ollama provider this is the server's model id; a path to a .gguf file works "
                         "with --provider llama.cpp (Ogun launches llama-server) or --provider ollama (auto-import).")
     parser.add_argument("--provider", type=str, default=None,
-                        help="Inference provider: ollama (default) | openai | llama.cpp | lmstudio, or a custom "
+                        help="Inference provider: ollama (default) | openai | llama.cpp | lmstudio | anthropic, or a custom "
                              "provider defined in config/providers.json or $OGUN_CUSTOM_PROVIDERS. Can also be "
                              "set with $OGUN_PROVIDER. 'openai' means any OpenAI-compatible local server "
-                             "(llama-server, vLLM, HF TGI, Unsloth Studio, ...).")
+                             "(llama-server, vLLM, HF TGI, Unsloth Studio, ...); 'anthropic' speaks the Anthropic "
+                             "Messages API (Anthropic itself, or gateways like Free Claude Code via --host).")
     parser.add_argument("--host", type=str, default=None,
                         help="Base URL of the inference server (default: the provider's usual local address, "
                              "or $OGUN_LLM_HOST). For Ollama this overrides $OLLAMA_HOST.")
@@ -301,7 +304,7 @@ def main() -> None:
     print("  Type 'exit' or 'quit' to close. Press Ctrl+C to cancel a turn.")
     if session.provider == "ollama":
         print("  GPU memory: /vram auto | /vram shared | /vram max | /vram cpu | /vram free | /vram status")
-    print("  Switch anytime: /model <tag, id or .gguf path> | /provider <ollama|openai|llama.cpp|lmstudio>")
+    print("  Switch anytime: /model <tag, id or .gguf path> | /provider <ollama|openai|llama.cpp|lmstudio|anthropic>")
     print("  Local models: /models lists everything Ogun found on this machine")
     print("=" * 60)
 
@@ -321,7 +324,7 @@ def main() -> None:
                 if provider_cmd["action"] == "status":
                     print(f"\n{session.status()}\n"
                           "Switch with /provider <name> [host]  |  /provider list shows every provider  |  "
-                          "define one here: /provider add <name> <host> [model] [keyenv=VAR] [key=KEY]  |  "
+                          "define one here: /provider add <name> <host> [model] [keyenv=VAR] [key=KEY] [type=anthropic]  |  "
                           "/provider edit <name> [field=value]  |  /provider remove <name>")
                 elif provider_cmd["action"] == "list":
                     print(f"\n{provider_listing(session.provider, session.label)}")
@@ -332,7 +335,7 @@ def main() -> None:
                 elif provider_cmd["action"] == "add":
                     _ok, _msg = session.add_provider(provider_cmd["name"], provider_cmd["host"],
                                                      provider_cmd["model"], provider_cmd["api_key_env"],
-                                                     provider_cmd["api_key"])
+                                                     provider_cmd["api_key"], provider_cmd["api_type"])
                     engine.client = session.client
                     print(f"\n{_msg}")
                 elif provider_cmd["action"] == "edit":
@@ -348,7 +351,7 @@ def main() -> None:
                 # malformed command to the model as if it were chat prose.
                 print("\nThat /provider line didn't parse. Forms: /provider [list] | /provider <name> [host] | "
                       "/provider add <name> <host> [model] [keyenv=VAR] [key=KEY] | "
-                      "/provider edit <name> [host=|model=|keyenv=|key=] | /provider remove <name>")
+                      "/provider edit <name> [host=|model=|keyenv=|key=|type=] | /provider remove <name>")
                 continue
             model_match = _MODEL_CMD.match(user_input)
             if model_match:

@@ -180,7 +180,9 @@ OGUN_PROVIDER=lmstudio ./run_ogun.sh                   # same, via the environme
 }
 ```
 
-Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, there are two ways to supply it: `api_key_env` names the environment variable holding it — the variable's *name*, not the key — and Ogun warns at startup, on `/provider list`, and when switching if that variable isn't set in its environment; or `api_key` (added in chat as `key=...`) stores the key itself in `config/providers.json`, the zero-friction route for a local-only setup — the file is chmod 600 whenever a key is stored, the key is never printed back (listings and edit views show `key=stored`), and a set `api_key_env` still wins over the stored key. For the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. Custom providers are always OpenAI-compatible endpoints — a service with a different API shape still needs a built-in provider.
+Then `--provider bigbox` and `/provider bigbox` just work, with that default model. The same JSON can come from the `OGUN_CUSTOM_PROVIDERS` environment variable (it wins per name). If a server wants a Bearer key, there are two ways to supply it: `api_key_env` names the environment variable holding it — the variable's *name*, not the key — and Ogun warns at startup, on `/provider list`, and when switching if that variable isn't set in its environment; or `api_key` (added in chat as `key=...`) stores the key itself in `config/providers.json`, the zero-friction route for a local-only setup — the file is chmod 600 whenever a key is stored, the key is never printed back (listings and edit views show `key=stored`), and a set `api_key_env` still wins over the stored key. For the plain `openai` provider, `OGUN_LLM_API_KEY` is sent instead. A definition can also carry `"type": "anthropic"` for an Anthropic-shaped endpoint (see below); without it, a custom provider is an OpenAI-compatible endpoint.
+
+**Anthropic-shaped servers.** Some gateways speak Anthropic's Messages API instead of OpenAI's — notably [Free Claude Code](https://github.com/Alishahryar1/free-claude-code), which fronts NVIDIA NIM / OpenRouter / local models for Claude Code on `http://127.0.0.1:8082`. Those servers answer `/v1/models` (so they look OpenAI-compatible at first glance) but 404 on `/v1/chat/completions`. Use the `anthropic` provider for them: `--provider anthropic --host http://127.0.0.1:8082 --model <id>`, or bake it into a custom provider from chat with `/provider add fcc http://localhost:8082 kimi-k3.1-pro key=freecc type=anthropic`. Ogun translates its history, tool calls, and streaming to and from the Messages API (the same provider also works against `https://api.anthropic.com` itself with a real Anthropic key).
 
 Notes:
 
@@ -259,7 +261,7 @@ All optional. Set them as environment variables before running `./run_ogun.sh`.
 |---|---|---|
 | `OGUN_MODEL` | `qwen2.5-coder:14b` | model name |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | where Ollama listens |
-| `OGUN_PROVIDER` | `ollama` | inference provider: `ollama`, `openai`, `llama.cpp` or `lmstudio` |
+| `OGUN_PROVIDER` | `ollama` | inference provider: `ollama`, `openai`, `llama.cpp`, `lmstudio` or `anthropic` |
 | `OGUN_LLM_HOST` | - | base URL for non-Ollama providers (overridden by `--host`) |
 | `OGUN_MODEL_DIRS` | - | extra folders to scan for GGUF/HF models (`:`-separated), on top of `~/models`, the Hugging Face cache, LM Studio's folder and `training/data/exports` |
 | `OGUN_CUSTOM_PROVIDERS` | - | custom named providers as a JSON object (`{"name": {"host": ..., "model": ..., "api_key_env": ...}}`); same format as `config/providers.json`, wins per name |

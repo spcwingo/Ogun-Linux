@@ -664,6 +664,157 @@ def test_explicit_model_is_never_overridden() -> None:
         assert carried.model == "srv-1" and "server's model" in note, note
 
 
+def _anthropic_urlopen_factory(captured: dict):
+    """Fake Anthropic-shaped server (models + messages; chat/completions 404s, like FCC)."""
+    import urllib.error
+
+    def fake(req, timeout=None):
+        url = req.full_url
+        if url.endswith("/v1/chat/completions"):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"Not Found"))
+        if url.endswith("/v1/models"):
+            return _json_resp({"data": [{"id": "kimi-k3.1-pro"}, {"id": "other/model"}]})
+        if url.endswith("/v1/messages"):
+            payload = json.loads(req.data.decode("utf-8"))
+            captured.setdefault("payloads", []).append(payload)
+            captured["headers"] = dict(req.header_items())
+            texts = []
+            has_tool_result = False
+            for m in payload.get("messages", []):
+                for b in m.get("content", []):
+                    if b.get("type") == "text":
+                        texts.append(b.get("text", ""))
+                    if b.get("type") == "tool_result":
+                        has_tool_result = True
+            if payload.get("stream"):
+                if "USETOOL" in " ".join(texts) and not has_tool_result:
+                    lines = [
+                        b'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_9", "name": "read_file", "input": {}}}',
+                        b'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\\"filepath\\": \\"sample.txt\\"}"}}',
+                        b'data: {"type": "message_stop"}',
+                    ]
+                else:
+                    lines = [
+                        b'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}',
+                        b'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "streamed "}}',
+                        b'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "reply"}}',
+                        b'data: {"type": "message_stop"}',
+                    ]
+                return FakeResp(lines=lines)
+            if has_tool_result:
+                return _json_resp({"content": [{"type": "text", "text": "The file contains sample text."}]})
+            if "USETOOL" in " ".join(texts):
+                return _json_resp({"content": [{"type": "tool_use", "id": "toolu_1", "name": "read_file",
+                                                "input": {"filepath": "sample.txt"}}]})
+            return _json_resp({"content": [{"type": "text", "text": "anthropic hello"}]})
+        raise AssertionError(f"unexpected URL {url}")
+    return fake
+
+
+def test_anthropic_client_and_translation() -> None:
+    # --- message translation: system extraction, tool id synthesis/matching, role merging
+    system, conv = providers._to_anthropic_messages([
+        {"role": "system", "content": "You are Ogun."},
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "read_file", "arguments": {"filepath": "a.txt"}}}]},
+        {"role": "tool", "content": "file body"},
+        {"role": "assistant", "content": "done"},
+    ])
+    assert system == "You are Ogun."
+    assert [m["role"] for m in conv] == ["user", "assistant", "user", "assistant"], conv
+    tool_use = conv[1]["content"][0]
+    assert tool_use["type"] == "tool_use" and tool_use["id"] == "toolu_1", tool_use
+    tool_result = conv[2]["content"][0]
+    assert tool_result["type"] == "tool_result" and tool_result["tool_use_id"] == "toolu_1", tool_result
+
+    # --- options: max_tokens required, temperature wins over top_p
+    from ogun_core.config import llm_options as _llm_options
+    opts = providers._map_anthropic_options(_llm_options())
+    assert opts["max_tokens"] == 3072 and "temperature" in opts and "top_p" not in opts, opts
+
+    # --- client: text reply, tool_use reply, payload shape, headers
+    captured: dict = {}
+    client = providers.AnthropicMessagesClient(host="http://127.0.0.1:8082", model="kimi-k3.1-pro",
+                                               label="fcc", api_key="freecc")
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "Read a file",
+                                                "parameters": {"type": "object", "properties": {"filepath": {"type": "string"}}}}}]
+    with patch("ogun_core.providers.urllib.request.urlopen", _anthropic_urlopen_factory(captured)):
+        out = client.chat([{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}], tools=tools)
+        assert out["content"] == "anthropic hello" and out["tool_calls"] == [], out
+        payload = captured["payloads"][-1]
+        assert payload["system"] == "sys" and payload["max_tokens"] > 0, payload
+        assert payload["tools"][0]["name"] == "read_file" and "input_schema" in payload["tools"][0], payload
+        assert captured["headers"].get("X-api-key") == "freecc", captured["headers"]
+        assert captured["headers"].get("Anthropic-version") == "2023-06-01", captured["headers"]
+
+        out = client.chat([{"role": "user", "content": "USETOOL please"}], tools=tools)
+        assert out["tool_calls"][0]["function"]["name"] == "read_file", out
+        assert out["tool_calls"][0]["function"]["arguments"] == {"filepath": "sample.txt"}, out
+        assert out["tool_calls"][0]["id"] == "toolu_1", out
+
+        # streaming: text assembly + tool argument fragments
+        pieces: list = []
+        out = client.chat([{"role": "user", "content": "hi"}], on_token=pieces.append)
+        assert out["content"] == "streamed reply" and "".join(pieces) == "streamed reply", out
+        out = client.chat([{"role": "user", "content": "USETOOL"}], tools=tools, stream=True)
+        assert out["tool_calls"][0]["function"]["arguments"] == {"filepath": "sample.txt"}, out
+
+        ok, msg = client.check_connection()
+        assert ok and "2 model(s)" in msg, msg
+        assert client.list_models() == ["kimi-k3.1-pro", "other/model"]
+
+    # --- factory, aliases, engine roundtrip
+    assert isinstance(create_client("anthropic", host="http://127.0.0.1:8082"), providers.AnthropicMessagesClient)
+    assert normalize_provider("claude") == "anthropic"
+    captured2: dict = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "sample.txt").write_text("hello world from sample", encoding="utf-8")
+        eng_client = providers.AnthropicMessagesClient(host="http://127.0.0.1:8082", model="kimi-k3.1-pro")
+        engine = CoreEngine(client=eng_client, base_dir=root)
+        with patch("ogun_core.providers.urllib.request.urlopen", _anthropic_urlopen_factory(captured2)):
+            reply = engine.run_turn("Please read sample.txt USETOOL")
+        assert "The file contains sample text." in reply, reply
+        assert len(captured2["payloads"]) == 2, captured2["payloads"]
+
+
+def test_anthropic_custom_provider_type() -> None:
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
+        "fcc": {"host": "http://127.0.0.1:8082", "model": "kimi-k3.1-pro",
+                "api_key": "freecc", "type": "anthropic"}})}
+    with patch.dict(os.environ, env):
+        target = resolve_provider_target("fcc")
+        assert target["kind"] == "anthropic", target
+    captured: dict = {}
+    session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+    with patch.dict(os.environ, env), \
+         patch("ogun_core.providers.urllib.request.urlopen", _anthropic_urlopen_factory(captured)):
+        ok, msg = session.switch_provider("fcc")
+        assert ok and session.provider == "anthropic", msg
+        assert isinstance(session.client, providers.AnthropicMessagesClient)
+        assert session.model == "kimi-k3.1-pro", session.model
+
+    # save/edit roundtrip with the type field, in a temp providers file
+    with tempfile.TemporaryDirectory() as tmp:
+        providers.CUSTOM_PROVIDERS_PATH = Path(tmp) / "providers.json"
+        os.environ.pop("OGUN_CUSTOM_PROVIDERS", None)
+        ok, msg = providers.save_custom_provider("gw", "http://127.0.0.1:8082", api_type="anthropic")
+        assert ok and providers.get_custom_provider("gw")["type"] == "anthropic", msg
+        ok, msg = providers.save_custom_provider("gw2", "http://127.0.0.1:8082", api_type="grpc")
+        assert not ok and "Unknown provider type" in msg, msg
+        ok, msg = providers.edit_custom_provider("gw", {"type": "openai"})
+        assert ok and "type" not in providers.get_custom_provider("gw"), msg
+        listing = providers.provider_listing()
+        assert "type=anthropic" not in listing  # gw is openai-typed again now
+
+    import main as ogun_main
+    parsed = ogun_main.parse_provider_command("/provider add fcc http://localhost:8082 kimi-k3.1-pro key=freecc type=anthropic")
+    assert parsed["api_type"] == "anthropic" and parsed["api_key"] == "freecc", parsed
+    parsed = ogun_main.parse_provider_command("/provider edit fcc type=anthropic")
+    assert parsed["changes"] == {"type": "anthropic"}, parsed
+
+
 def test_save_and_remove_custom_provider() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "providers.json"
@@ -716,7 +867,7 @@ def test_parse_provider_command() -> None:
     assert parse("/provider openai http://h:1")["host"] == "http://h:1"
     add = parse("/provider add bigbox http://h:8000 qwen3-32b keyenv=BB_KEY")
     assert add == {"action": "add", "name": "bigbox", "host": "http://h:8000",
-                   "model": "qwen3-32b", "api_key_env": "BB_KEY", "api_key": None}, add
+                   "model": "qwen3-32b", "api_key_env": "BB_KEY", "api_key": None, "api_type": None}, add
     assert parse("/provider add bigbox http://h:8000")["model"] is None
     assert parse("/provider remove bigbox") == {"action": "remove", "name": "bigbox"}
     # tolerant add forms: named fields in any position, api-key= alias
@@ -834,6 +985,8 @@ def main() -> int:
         test_literal_api_key_support,
         test_unset_keyenv_is_surfaced,
         test_explicit_model_is_never_overridden,
+        test_anthropic_client_and_translation,
+        test_anthropic_custom_provider_type,
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,
         test_parse_provider_command,
