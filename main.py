@@ -5,6 +5,7 @@ import argparse
 import atexit
 import os
 import re
+import signal
 import sys
 
 from ogun_core import autotune
@@ -343,8 +344,10 @@ def main() -> None:
             print(f"[*]{note}")
             args.model = session.model
 
-    # A managed llama-server is Ogun's child: always stop it at exit. Freeing the Ollama model's GPU
-    # memory on exit (normal exit, Ctrl+C, --once, --build-plugin) can be opted out: OGUN_UNLOAD_ON_EXIT=0.
+    # A managed llama-server is Ogun's child: always stop it at exit. Releasing the Ollama
+    # models this session loaded (so their VRAM is freed) can be opted out: OGUN_UNLOAD_ON_EXIT=0.
+    # The release runs on normal exit AND on SIGTERM/SIGHUP: closing the terminal kills the
+    # process with SIGHUP, which atexit alone never sees — the model would stay resident.
     atexit.register(session.stop_managed_server)
     if os.environ.get("OGUN_UNLOAD_ON_EXIT", "1") != "0":
         _unloaded = {"done": False}
@@ -352,10 +355,21 @@ def main() -> None:
         def _unload_on_exit() -> None:
             if not _unloaded["done"]:
                 _unloaded["done"] = True
-                if session.provider == "ollama":
-                    unload_model(model=session.model)
+                session.release_models()
 
         atexit.register(_unload_on_exit)
+
+        def _release_on_signal(signum, frame) -> None:
+            _unload_on_exit()
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        for _sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+            if _sig is not None:
+                try:
+                    signal.signal(_sig, _release_on_signal)
+                except (ValueError, OSError):
+                    pass
 
     # Initialize workspace directories on boot
     init_user_workspace()

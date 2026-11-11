@@ -1123,6 +1123,47 @@ def test_timeout_message_ollama_wording_kept() -> None:
     assert engine.last_turn_status["status"] == "timeout"
 
 
+class _RecordingOllamaClient:
+    """Stands in for engine.OllamaClient: records every unload() by model name."""
+
+    unloaded: list = []
+
+    def __init__(self, host=None, model=None, **kwargs):
+        self.model = model
+
+    def unload(self):
+        type(self).unloaded.append(self.model)
+        return {"ok": True, "detail": "unloaded"}
+
+
+def test_release_models_unloads_every_ollama_model_used() -> None:
+    with patch("ogun_core.engine.OllamaClient", _RecordingOllamaClient):
+        session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+        session._set_model("llama3.1:8b")   # model switched mid-session
+        session.provider = "openai"         # session ends on another provider entirely
+        _RecordingOllamaClient.unloaded = []
+        session.release_models()
+    assert sorted(_RecordingOllamaClient.unloaded) == ["llama3.1:8b", "qwen2.5-coder:14b"], \
+        _RecordingOllamaClient.unloaded
+
+
+def test_release_models_without_ollama_is_quiet_and_stops_managed() -> None:
+    stopped = []
+
+    class _FakeServer:
+        def stop(self):
+            stopped.append(True)
+
+    _RecordingOllamaClient.unloaded = []
+    session = ProviderSession("openai", "http://127.0.0.1:1234", "srv-1")
+    session.llama_server = _FakeServer()
+    with patch("ogun_core.engine.OllamaClient", _RecordingOllamaClient):
+        session.release_models()
+        session.release_models()  # idempotent: a second call must not raise or re-stop
+    assert _RecordingOllamaClient.unloaded == []
+    assert stopped == [True]
+
+
 def main() -> int:
     tests = [
         test_normalize_provider,
@@ -1168,6 +1209,8 @@ def main() -> int:
         test_model_menu_provider_switch,
         test_timeout_message_names_the_provider,
         test_timeout_message_ollama_wording_kept,
+        test_release_models_unloads_every_ollama_model_used,
+        test_release_models_without_ollama_is_quiet_and_stops_managed,
     ]
     for t in tests:
         t()

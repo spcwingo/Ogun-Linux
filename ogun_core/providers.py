@@ -1310,6 +1310,9 @@ class ProviderSession:
         # an external server's advertised list must never override it — gateways and routers
         # routinely serve model ids they do not list verbatim.
         self.model_explicit = model_explicit
+        # Every Ollama model this session has run, so exit can release them all —
+        # including one that was switched away from mid-session.
+        self._ollama_models_used = {model} if provider == "ollama" else set()
         self.llama_server: Optional[LlamaCppServer] = None
         self.client = create_client(provider, model=model, host=self.host, timeout=timeout,
                                     api_key=api_key, label=name)
@@ -1330,6 +1333,19 @@ class ProviderSession:
         if self.llama_server is not None:
             self.llama_server.stop()
             self.llama_server = None
+
+    def release_models(self) -> None:
+        """Free everything this session loaded: stop the managed llama-server and
+        unload every Ollama model the session ran — whichever provider happens to
+        be active now. Wired to exit (atexit plus termination signals) in main.py.
+        Best effort and idempotent: never raises."""
+        self.stop_managed_server()
+        for model in sorted(self._ollama_models_used):
+            try:
+                from ogun_core.engine import OllamaClient
+                OllamaClient(host=OLLAMA_HOST, model=model).unload()
+            except Exception:
+                pass
 
     def _unload_current_ollama_model(self) -> None:
         """Best effort: free the VRAM of the Ollama model we are switching away from."""
@@ -1402,6 +1418,8 @@ class ProviderSession:
         self.model = name
         self.client.model = name
         self.model_explicit = True
+        if self.provider == "ollama":
+            self._ollama_models_used.add(name)
 
     # -- Switches ------------------------------------------------------------
     def switch_provider(self, name: str, new_host: Optional[str] = None, force: bool = False) -> Tuple[bool, str]:
@@ -1448,6 +1466,8 @@ class ProviderSession:
         self.name, self.api_key = target["display"], target["api_key"]
         if target["model"]:
             self.model = str(target["model"])
+        if kind == "ollama":
+            self._ollama_models_used.add(self.model)
         # A model from the provider's definition is an explicit choice; a carried-over model
         # from the previous provider is not, and may still be adopted from the server's list.
         self.model_explicit = bool(target["model"])
