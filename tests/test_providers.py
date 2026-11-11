@@ -901,7 +901,7 @@ def test_provider_listing() -> None:
             builtin = providers.provider_listing(active_kind="ollama", active_display="Ollama")
     assert "* filebox" in text and "model=fm" in text and "keyenv=FB_KEY" in text, text
     assert "(custom, config/providers.json)" in text and "(custom, $OGUN_CUSTOM_PROVIDERS)" in text
-    assert "envbox" in text and "ollama" in text and "lmstudio" in text
+    assert "envbox" in text and "ollama" in text and "lmstudio" in text and "anthropic" in text
     assert "* ollama" in builtin, builtin
     assert "* filebox" not in builtin
 
@@ -1088,6 +1088,41 @@ def test_model_menu_provider_switch() -> None:
     assert s.switched_models == ["fcc-2"], s.switched_models
 
 
+class _TimeoutClient:
+    """A non-Ollama client stand-in whose chat always times out."""
+
+    label = "fcc"
+    host = "http://localhost:8082"
+    model = "nvidia/nemotron-3-ultra-550b-a55b"
+    timeout = 12.0
+
+    def chat(self, messages, tools=None, options=None, stream=False, on_token=None):
+        raise TimeoutError("The read operation timed out")
+
+
+def test_timeout_message_names_the_provider() -> None:
+    engine = CoreEngine(client=_TimeoutClient(), plugin_manager=None)
+    reply = engine.run_turn("hello there")
+    assert "timed out after 12 seconds" in reply, reply
+    assert "fcc at http://localhost:8082" in reply, reply
+    assert "nvidia/nemotron-3-ultra-550b-a55b" in reply, reply
+    assert "Ollama may be loading" not in reply, reply
+    assert engine.last_turn_status["status"] == "timeout"
+
+
+def test_timeout_message_ollama_wording_kept() -> None:
+    client = OllamaClient(host="http://127.0.0.1:11434", model="qwen2.5-coder:14b")
+
+    def _boom(*args, **kwargs):
+        raise TimeoutError("timed out")
+
+    client.chat = _boom
+    engine = CoreEngine(client=client, plugin_manager=None)
+    reply = engine.run_turn("hello there")
+    assert "Ollama may be loading weights or overloaded" in reply, reply
+    assert engine.last_turn_status["status"] == "timeout"
+
+
 def main() -> int:
     tests = [
         test_normalize_provider,
@@ -1131,6 +1166,8 @@ def main() -> int:
         test_model_menu_filter_and_paging,
         test_model_menu_no_models_falls_back,
         test_model_menu_provider_switch,
+        test_timeout_message_names_the_provider,
+        test_timeout_message_ollama_wording_kept,
     ]
     for t in tests:
         t()

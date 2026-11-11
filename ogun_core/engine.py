@@ -368,6 +368,34 @@ class CoreEngine:
             "error": "",
         }
 
+    def _client_timeout(self) -> float:
+        """The active client's request timeout in seconds (300 when it doesn't say)."""
+        if hasattr(self.client, "get_effective_timeout"):
+            return float(self.client.get_effective_timeout())
+        return float(getattr(self.client, "timeout", 300.0) or 300.0)
+
+    def _timeout_message(self, eff_timeout: float) -> str:
+        """The user-facing timeout text, worded for the provider actually in use:
+        Ollama keeps its classic 'loading weights' hint; every other provider is
+        named with its host and model, since the cause there is that server (or,
+        behind a gateway like Free Claude Code, its upstream) not answering."""
+        if isinstance(self.client, OllamaClient):
+            return (
+                f"Model request timed out after {eff_timeout:.0f} seconds. "
+                "Ollama may be loading weights or overloaded. "
+                "Your progress has been preserved; you can say 'continue' to resume."
+            )
+        label = getattr(self.client, "label", None) or type(self.client).__name__
+        host = getattr(self.client, "host", "")
+        model = getattr(self.client, "model", "")
+        where = f"{label} at {host}" if host else label
+        return (
+            f"Model request timed out after {eff_timeout:.0f} seconds waiting on {where} "
+            f"(model '{model}'). That server may be loading the model, busy, or — behind a "
+            "gateway — waiting on a slow upstream. "
+            "Your progress has been preserved; you can say 'continue' to resume."
+        )
+
     def _get_active_tool_schemas(self) -> List[Dict[str, Any]]:
         schemas = list(BUILTIN_TOOL_SCHEMAS)
         if self.plugin_manager:
@@ -580,15 +608,8 @@ class CoreEngine:
                 self.messages.append({"role": "assistant", "content": final_msg})
                 return final_msg
             except TimeoutError:
-                eff_timeout = (
-                    getattr(self.client, "get_effective_timeout", lambda: 300.0)()
-                    if hasattr(self.client, "get_effective_timeout")
-                    else getattr(self.client, "timeout", 300.0)
-                )
-                err_msg = (
-                    f"Model request timed out after {eff_timeout:.0f} seconds. Ollama may be loading weights or overloaded. "
-                    "Your progress has been preserved; you can say 'continue' to resume."
-                )
+                eff_timeout = self._client_timeout()
+                err_msg = self._timeout_message(eff_timeout)
                 self.messages.append({"role": "assistant", "content": err_msg})
                 self.last_turn_status = {
                     "status": "timeout",
@@ -607,15 +628,8 @@ class CoreEngine:
             try:
                 response = self.client.chat(self.messages, tools=tool_schemas)
             except TimeoutError:
-                eff_timeout = (
-                    getattr(self.client, "get_effective_timeout", lambda: 300.0)()
-                    if hasattr(self.client, "get_effective_timeout")
-                    else getattr(self.client, "timeout", 300.0)
-                )
-                err_msg = (
-                    f"Model request timed out after {eff_timeout:.0f} seconds. Ollama may be loading weights or overloaded. "
-                    "Your progress has been preserved; you can say 'continue' to resume."
-                )
+                eff_timeout = self._client_timeout()
+                err_msg = self._timeout_message(eff_timeout)
                 self.messages.append({"role": "assistant", "content": err_msg})
                 self.last_turn_status = {
                     "status": "timeout",

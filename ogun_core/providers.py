@@ -1130,7 +1130,7 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
         return "*" if is_active else " "
 
     lines = ["Providers (* = active):"]
-    for kind in ("ollama", "openai", "llama.cpp", "lmstudio"):
+    for kind in ("ollama", "openai", "llama.cpp", "lmstudio", "anthropic"):
         host = resolve_provider_host(kind, None)
         is_active = kind == active_kind and (active_display in (None, PROVIDER_LABELS.get(kind), kind))
         lines.append(f" {mark(is_active)} {kind:12s} {host}  (built-in)")

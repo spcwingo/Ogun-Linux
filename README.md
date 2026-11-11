@@ -61,7 +61,7 @@ The prompt has bash-style line editing (via GNU readline): Left/Right arrows mov
 | `--once "prompt"` | run a single turn, print the answer, exit |
 | `--build-plugin "description"` | have the model write, test and mount a plugin (see below) |
 | `--model NAME` | use another model (default `qwen2.5-coder:14b`). With a non-Ollama provider this is that server's model id; a path to a `.gguf` file works with `--provider llama.cpp` (Ogun launches llama-server) or `--provider ollama` (auto-import) |
-| `--provider NAME` | where the model runs: `ollama` (default), `openai` (any OpenAI-compatible local server), `llama.cpp`, `lmstudio` |
+| `--provider NAME` | where the model runs: `ollama` (default), `openai` (any OpenAI-compatible local server), `llama.cpp`, `lmstudio`, `anthropic` (Anthropic Messages API servers and gateways), or the name of a custom provider you defined |
 | `--host URL` | the inference server's base URL (default: the provider's usual local address) |
 | `--list-models` | list every local model Ogun can find, with the command that runs each, then exit |
 | `--list-providers` | list all providers (built-ins and custom) with their hosts and default models, then exit |
@@ -364,6 +364,8 @@ python3 tests/run_all.py
 | `tests/test_build_upgrade_fixes.py` | tool and plugin updates, VRAM refresh, test repair |
 | `tests/test_option_checks.py` | checks that requested tool options really work |
 | `tests/test_unlimited_builds.py` | no-limit builds, Ctrl+C stop, failure research, restarts, feedback size |
+| `tests/test_providers.py` | non-Ollama providers (OpenAI-compatible, Anthropic Messages), custom named providers, `/provider` and `/model` switching, the `/model` menu, provider-aware error text |
+| `tests/test_lineedit.py` | prompt line editing and history (`~/.ogun_history`, `$OGUN_HISTORY_FILE`, fallback without readline) |
 
 ## Safety model
 
