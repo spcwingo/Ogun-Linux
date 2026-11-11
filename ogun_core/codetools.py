@@ -74,6 +74,63 @@ def read_file(
     return content
 
 
+def _human_size(size: int) -> str:
+    """Render a byte count compactly (B, KB, MB)."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def list_directory(
+    dirpath: str,
+    base_dir: Optional[Path] = None,
+    show_hidden: bool = False,
+) -> str:
+    """List files and subdirectories in a directory, with sizes for files.
+
+    Directories sort first, then files, each alphabetical. Hidden entries
+    (leading dot) are omitted unless show_hidden is set.
+    """
+    root = (base_dir or OGUN_ROOT).resolve()
+    raw = str(dirpath).strip().strip('"').strip("'") or "."
+    p = Path(raw)
+    if not p.is_absolute():
+        p = (root / p).resolve()
+    else:
+        p = p.resolve()
+
+    if not p.exists():
+        return f"Error: Directory '{dirpath}' does not exist."
+    if not p.is_dir():
+        return f"Error: '{dirpath}' is a file, not a directory."
+
+    try:
+        entries = list(p.iterdir())
+    except Exception as exc:
+        return f"Error listing directory '{dirpath}': {exc}"
+
+    if not show_hidden:
+        entries = [e for e in entries if not e.name.startswith(".")]
+    entries.sort(key=lambda e: (not e.is_dir(), e.name.lower()))
+
+    dirs = sum(1 for e in entries if e.is_dir())
+    files = len(entries) - dirs
+    lines = [f"Directory: {p}"]
+    for e in entries:
+        if e.is_dir():
+            lines.append(f"{e.name}/")
+        else:
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            lines.append(f"{e.name} ({_human_size(size)})")
+    lines.append(f"{dirs} director{'y' if dirs == 1 else 'ies'}, {files} file{'s' if files != 1 else ''}")
+    return "\n".join(lines)
+
+
 def write_file(
     filepath: str,
     content: str,

@@ -16,6 +16,7 @@ from ogun_core.base_tool import BaseTool, ToolResult
 from ogun_core.codetools import (
     check_syntax,
     create_plugin,
+    list_directory,
     list_plugins,
     read_file,
     replace_in_file,
@@ -65,6 +66,21 @@ BUILTIN_TOOL_SCHEMAS = [
                     "end_line": {"type": "integer", "description": "Optional ending line (1-indexed)."},
                 },
                 "required": ["filepath"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "List files and subdirectories in a directory, with sizes for files. Use this to see what is in a folder before reading individual files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dirpath": {"type": "string", "description": "Path to the directory to list."},
+                    "show_hidden": {"type": "boolean", "description": "Include hidden entries (leading dot). Default false."},
+                },
+                "required": ["dirpath"],
             },
         },
     },
@@ -422,6 +438,12 @@ class CoreEngine:
                     start_line=args.get("start_line"),
                     end_line=args.get("end_line"),
                     base_dir=self.base_dir,
+                )
+            elif name == "list_directory":
+                return list_directory(
+                    dirpath=args.get("dirpath", ""),
+                    base_dir=self.base_dir,
+                    show_hidden=bool(args.get("show_hidden", False)),
                 )
             elif name == "write_file":
                 res = write_file(

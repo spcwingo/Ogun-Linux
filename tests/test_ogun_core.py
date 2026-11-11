@@ -24,13 +24,13 @@ if str(OGUN_ROOT) not in sys.path:
 from ogun_core.base_tool import BaseTool, ToolResult
 from ogun_core.codetools import (
     check_syntax,
+    list_directory,
     read_file,
     replace_in_file,
     run_python_test,
     write_file,
 )
-from ogun_core.config import NUM_CTX
-from ogun_core.engine import ContextManager, CoreEngine
+from ogun_core.engine import BUILTIN_TOOL_SCHEMAS, ContextManager, CoreEngine
 from ogun_core.plugin_manager import PluginManager, normalize_plugin_name
 from ogun_core.security import PathSecurityGuard
 from ogun_core.toolcalls import parse_tool_calls
@@ -513,6 +513,35 @@ def test_codetools_operations() -> None:
         assert "SyntaxError" in syn_bad
 
 
+def test_list_directory() -> None:
+    """Test list_directory: entries, hidden filtering, errors, schema, dispatch."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        (root / "subdir").mkdir()
+        (root / "a.py").write_text("print(1)\n", encoding="utf-8")
+        (root / "b.txt").write_text("hello", encoding="utf-8")
+        (root / ".hidden").write_text("secret", encoding="utf-8")
+
+        out = list_directory(".", base_dir=root)
+        assert "subdir/" in out
+        assert "a.py" in out and "b.txt" in out
+        assert ".hidden" not in out
+        assert "1 directory, 2 files" in out
+
+        out_hidden = list_directory(".", base_dir=root, show_hidden=True)
+        assert ".hidden" in out_hidden
+
+        assert "does not exist" in list_directory("nope", base_dir=root)
+        assert "not a directory" in list_directory("a.py", base_dir=root)
+
+        names = {s["function"]["name"] for s in BUILTIN_TOOL_SCHEMAS}
+        assert "list_directory" in names
+
+        engine = CoreEngine(client=object(), base_dir=root)
+        dispatched = engine.dispatch_tool("list_directory", {"dirpath": "."})
+        assert "subdir/" in dispatched and "a.py" in dispatched
+
+
 def test_utf8_subprocess_output() -> None:
     """Test that subprocess runner correctly decodes non-ASCII UTF-8 output under Windows cp1252."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -818,6 +847,7 @@ def run_all_tests() -> bool:
         ("6. Engine Turn Loop & Context Budget (Mock Client)", test_engine_turn_loop_with_mock_client),
         ("6b. Tool Rounds Limit (config default, env override, explicit arg)", test_tool_rounds_limit),
         ("7. Codetools Operations (Write, Replace, Read, Syntax)", test_codetools_operations),
+        ("7b. list_directory (entries, hidden, errors, schema, dispatch)", test_list_directory),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),
         ("9. Test Harness Two-Block Code Extraction", test_harness_code_extraction),
         ("10. VRAM profiles: table, aliases, runtime switching, env overrides", test_vram_config_and_options),
