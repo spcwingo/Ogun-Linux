@@ -189,6 +189,17 @@ class OllamaClient:
                 "Ensure Ollama is running ('ollama serve').",
             )
 
+    def list_models(self) -> List[str]:
+        """Names of the models in Ollama's library ([] when unreachable)."""
+        try:
+            req = urllib.request.Request(f"{self.host}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return [str(m.get("name")) for m in data.get("models", [])
+                    if isinstance(m, dict) and m.get("name")]
+        except Exception:
+            return []
+
     def unload(self) -> Dict[str, Any]:
         """Tell Ollama to drop the model from memory NOW (`{"model": ..., "keep_alive": 0}`), freeing its GPU VRAM.
 

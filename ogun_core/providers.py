@@ -1157,6 +1157,29 @@ def provider_listing(active_kind: Optional[str] = None, active_display: Optional
     return "\n".join(lines)
 
 
+def provider_choices(active_kind: Optional[str] = None,
+                       active_display: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Structured provider list for interactive menus (the /model menu's provider page):
+    built-ins first, then custom providers. Each entry is
+    {"name": <what switch_provider expects>, "display": <label with host>, "active": bool}."""
+    choices: List[Dict[str, Any]] = []
+    for kind in ("ollama", "openai", "llama.cpp", "lmstudio", "anthropic"):
+        choices.append({
+            "name": kind,
+            "display": f"{kind} — {resolve_provider_host(kind, None)}",
+            "active": kind == active_kind
+                      and (active_display in (None, PROVIDER_LABELS.get(kind), kind)),
+        })
+    customs = load_custom_providers()
+    for name in sorted(customs):
+        choices.append({
+            "name": name,
+            "display": f"{name} — {customs[name]['host']}",
+            "active": active_display is not None and name == active_display.strip().lower(),
+        })
+    return choices
+
+
 def edit_custom_provider(name: str, changes: Dict[str, Optional[str]]) -> Tuple[bool, str]:
     """Edit fields of a file-defined custom provider. `changes` maps host/model/keyenv/key to a
     new value; an empty string clears model/keyenv/key (host cannot be cleared). With no changes,
@@ -1335,6 +1358,17 @@ class ProviderSession:
         self.model = served[0]
         self.client.model = served[0]
         return f" Using the server's model '{served[0]}'."
+
+    def available_models(self) -> List[str]:
+        """Model ids the current provider's server advertises ([] when it cannot be asked:
+        server down, or a client with no listing call). Powers the /model menu."""
+        lister = getattr(self.client, "list_models", None)
+        if lister is None:
+            return []
+        try:
+            return [str(m) for m in lister() if m]
+        except Exception:
+            return []
 
     # -- GGUF activation (startup --model file.gguf and /model file.gguf) --
     def activate_gguf(self, gguf_path: Path) -> Tuple[bool, str]:

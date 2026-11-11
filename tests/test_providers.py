@@ -957,6 +957,137 @@ def test_session_edit_provider_live() -> None:
             assert ok and "reconnecting failed" in msg and session.host == "http://127.0.0.1:18080", msg
 
 
+def test_ollama_client_list_models() -> None:
+    client = OllamaClient(host="http://127.0.0.1:11434", model="qwen2.5-coder:14b")
+    with patch("ogun_core.engine.urllib.request.urlopen", _router_urlopen):
+        assert client.list_models() == ["qwen2.5-coder:14b", "llama3.1:8b"]
+    import urllib.error
+
+    def _boom(req, timeout=None):
+        raise urllib.error.URLError("down")
+
+    with patch("ogun_core.engine.urllib.request.urlopen", _boom):
+        assert client.list_models() == []
+
+
+def test_session_available_models() -> None:
+    session = ProviderSession("openai", "http://127.0.0.1:18080", "srv-1")
+    with patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+        assert session.available_models() == ["srv-1", "srv-2"]
+    dead = ProviderSession("openai", "http://127.0.0.1:1", "srv-1")
+    assert dead.available_models() == []
+
+    class _Exploding:
+        def list_models(self):
+            raise RuntimeError("nope")
+
+    session.client = _Exploding()
+    assert session.available_models() == []
+    session.client = object()  # a client with no listing call at all
+    assert session.available_models() == []
+
+
+def test_provider_choices() -> None:
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({"fcc": {"host": "http://localhost:8082", "model": "k"}})}
+    with patch.dict(os.environ, env):
+        choices = providers.provider_choices("openai", providers.PROVIDER_LABELS["openai"])
+        names = [c["name"] for c in choices]
+        assert names[:5] == ["ollama", "openai", "llama.cpp", "lmstudio", "anthropic"], names
+        assert names[-1] == "fcc"
+        active = {c["name"]: c["active"] for c in choices}
+        assert active["openai"] and not active["fcc"] and not active["ollama"]
+        choices2 = providers.provider_choices("anthropic", "fcc")
+        active2 = {c["name"]: c["active"] for c in choices2}
+        assert active2["fcc"] and not active2["anthropic"]
+
+
+class _MenuSession:
+    """ProviderSession stand-in for the /model menu: scripted models and switches."""
+
+    def __init__(self, models, model="m1"):
+        self.provider = "openai"
+        self.label = "MenuFake"
+        self.host = "http://menu.local"
+        self.model = model
+        self._models = list(models)
+        self.switched_models = []
+        self.switched_providers = []
+
+    def available_models(self):
+        return list(self._models)
+
+    def switch_model(self, value):
+        self.switched_models.append(value)
+        self.model = value
+        return True, f"Model set to '{value}' (via MenuFake)."
+
+    def switch_provider(self, name, new_host=None):
+        self.switched_providers.append(name)
+        if name == "fcc":
+            self.label = "fcc"
+            self.host = "http://localhost:8082"
+            self._models = ["fcc-1", "fcc-2"]
+            self.model = "fcc-1"
+            return True, "Switched to fcc at http://localhost:8082, model 'fcc-1'."
+        return False, f"Could not switch to {name}."
+
+
+def _run_menu(session, answers) -> str:
+    import main as ogun_main
+    printed = []
+    it = iter(answers)
+    ogun_main.choose_model_interactively(
+        session, input_fn=lambda prompt="": next(it), print_fn=printed.append)
+    return "\n".join(printed)
+
+
+def test_model_menu_select_and_cancel() -> None:
+    s = _MenuSession(["m1", "m2", "m3"], model="m1")
+    out = _run_menu(s, ["2"])
+    assert s.switched_models == ["m2"], s.switched_models
+    assert "1. m1" in out and "3. m3" in out
+    s2 = _MenuSession(["m1", "m2"])
+    _run_menu(s2, [""])
+    assert s2.switched_models == []
+
+
+def test_model_menu_filter_and_paging() -> None:
+    s = _MenuSession(["alpha", "beta", "alpine"], model="beta")
+    _run_menu(s, ["alp", "2"])
+    assert s.switched_models == ["alpine"], s.switched_models
+    many = [f"mod-{i:02d}" for i in range(1, 21)]
+    s2 = _MenuSession(many, model="mod-01")
+    out = _run_menu(s2, ["n", "17"])
+    assert s2.switched_models == ["mod-17"], s2.switched_models
+    assert "page 2/2" in out
+    s3 = _MenuSession(["alpha"], model="alpha")
+    out = _run_menu(s3, ["zzz", ""])
+    assert "No models match 'zzz'." in out and s3.switched_models == []
+
+
+def test_model_menu_no_models_falls_back() -> None:
+    s = _MenuSession([], model="solo")
+    out = _run_menu(s, [])
+    assert "Current model: solo (via MenuFake)." in out
+    assert s.switched_models == []
+
+
+def test_model_menu_provider_switch() -> None:
+    import main as ogun_main
+    choices = [
+        {"name": "openai", "display": "openai — http://menu.local", "active": True},
+        {"name": "fcc", "display": "fcc — http://localhost:8082", "active": False},
+    ]
+    s = _MenuSession(["m1", "m2"], model="m1")
+    printed = []
+    answers = iter(["v", "2", "2"])
+    with patch.object(ogun_main, "provider_choices", lambda kind, display: choices):
+        ogun_main.choose_model_interactively(
+            s, input_fn=lambda prompt="": next(answers), print_fn=printed.append)
+    assert s.switched_providers == ["fcc"], s.switched_providers
+    assert s.switched_models == ["fcc-2"], s.switched_models
+
+
 def main() -> int:
     tests = [
         test_normalize_provider,
@@ -993,6 +1124,13 @@ def main() -> int:
         test_provider_listing,
         test_edit_custom_provider,
         test_session_edit_provider_live,
+        test_ollama_client_list_models,
+        test_session_available_models,
+        test_provider_choices,
+        test_model_menu_select_and_cancel,
+        test_model_menu_filter_and_paging,
+        test_model_menu_no_models_falls_back,
+        test_model_menu_provider_switch,
     ]
     for t in tests:
         t()

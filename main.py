@@ -19,6 +19,7 @@ from ogun_core.providers import (
     ProviderSession,
     discover_local_models,
     format_model_list,
+    provider_choices,
     provider_listing,
     resolve_provider_target,
 )
@@ -122,6 +123,96 @@ def is_provider_command(text: str) -> bool:
 def is_model_command(text: str) -> bool:
     """True only for '/model' optionally followed by a model tag/id or a .gguf path, never for prose."""
     return bool(_MODEL_CMD.match(text or ""))
+
+
+_MODEL_MENU_PAGE_SIZE = 15
+
+
+def _provider_menu(session, input_fn, print_fn) -> bool:
+    """The /model menu's provider page. Returns True when the session switched provider."""
+    choices = provider_choices(session.provider, session.label)
+    print_fn("\nProviders (* = active):")
+    for i, choice in enumerate(choices, 1):
+        print_fn(f" {'*' if choice['active'] else ' '} {i:>2}. {choice['display']}")
+    answer = input_fn("Provider number (Enter to go back): ").strip()
+    if not answer:
+        return False
+    if not answer.isdigit():
+        print_fn("Not a number; back to the model list.")
+        return False
+    idx = int(answer)
+    if not 1 <= idx <= len(choices):
+        print_fn("Out of range; back to the model list.")
+        return False
+    target = choices[idx - 1]
+    if target["active"]:
+        print_fn(f"Already on {target['name']}.")
+        return False
+    _ok, msg = session.switch_provider(target["name"])
+    print_fn(f"\n{msg}")
+    return _ok
+
+
+def choose_model_interactively(session, input_fn=input, print_fn=print) -> None:
+    """The /model menu, shown for a bare `/model` with no argument.
+
+    Lists the current provider's models a page at a time: a number selects,
+    'n'/'b' move between pages, any other text filters the list, 'v' opens the
+    provider page (switching providers re-opens this menu on the new one),
+    and Enter cancels. When the server offers no model list, falls back to
+    the plain current-model text.
+    """
+    while True:  # re-entered on the new provider after a provider switch
+        models = session.available_models()
+        if not models:
+            print_fn(f"\nCurrent model: {session.model} (via {session.label}).\n"
+                     "Switch with /model <model tag, server model id, or path to a .gguf file>. "
+                     "/models lists what Ogun found on this machine.")
+            return
+        view = list(models)
+        page = 0
+        switched_provider = False
+        while True:
+            pages = max(1, (len(view) + _MODEL_MENU_PAGE_SIZE - 1) // _MODEL_MENU_PAGE_SIZE)
+            page = min(page, pages - 1)
+            start = page * _MODEL_MENU_PAGE_SIZE
+            header = f"\nModels from {session.label} at {session.host} (* = current"
+            header += f"; page {page + 1}/{pages}" if pages > 1 else ""
+            print_fn(header + "):")
+            for i, model_id in enumerate(view[start:start + _MODEL_MENU_PAGE_SIZE], start + 1):
+                print_fn(f" {'*' if model_id == session.model else ' '} {i:>3}. {model_id}")
+            print_fn("Number selects | 'n'/'b' change page | text filters | 'v' providers | Enter cancels")
+            answer = input_fn("Select: ").strip()
+            if not answer:
+                return
+            low = answer.lower()
+            if low == "v":
+                if _provider_menu(session, input_fn, print_fn):
+                    switched_provider = True
+                    break
+                continue
+            if low == "n" and pages > 1:
+                page = min(page + 1, pages - 1)
+                continue
+            if low == "b" and pages > 1:
+                page = max(page - 1, 0)
+                continue
+            if answer.isdigit():
+                idx = int(answer)
+                if 1 <= idx <= len(view):
+                    _ok, msg = session.switch_model(view[idx - 1])
+                    print_fn(f"\n{msg}")
+                    return
+                print_fn(f"No model #{idx} in the list.")
+                continue
+            filtered = [m for m in models if low in m.lower()]
+            if not filtered:
+                print_fn(f"No models match '{answer}'.")
+                continue
+            view = filtered
+            page = 0
+        if not switched_provider:
+            return
 
 
 def main() -> None:
@@ -308,7 +399,7 @@ def main() -> None:
         print("  Editing: Left/Right move within the line, Up/Down recall previous entries, Ctrl+R searches history")
     if session.provider == "ollama":
         print("  GPU memory: /vram auto | /vram shared | /vram max | /vram cpu | /vram free | /vram status")
-    print("  Switch anytime: /model <tag, id or .gguf path> | /provider <ollama|openai|llama.cpp|lmstudio|anthropic>")
+    print("  Switch anytime: /model <tag, id or .gguf path> (bare /model opens a menu) | /provider <ollama|openai|llama.cpp|lmstudio|anthropic>")
     print("  Local models: /models lists everything Ogun found on this machine")
     print("=" * 60)
 
@@ -360,9 +451,8 @@ def main() -> None:
             model_match = _MODEL_CMD.match(user_input)
             if model_match:
                 if not model_match.group(1):
-                    print(f"\nCurrent model: {session.model} (via {session.label}).\n"
-                          "Switch with /model <model tag, server model id, or path to a .gguf file>. "
-                          "/models lists what Ogun found on this machine.")
+                    choose_model_interactively(session)
+                    engine.client = session.client
                 else:
                     _ok, _msg = session.switch_model(model_match.group(1).strip())
                     engine.client = session.client

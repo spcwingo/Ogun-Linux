@@ -160,6 +160,7 @@ Ollama is the default, but Ogun can chat with models served by the other local t
 | `/provider list` | list every provider — built-ins and customs — with host, default model, key reference, where it's defined, and which one is active |
 | `/provider edit bigbox model=qwen3-8b` | change one field of a saved provider (`host=`, `model=`, `keyenv=`, `key=`; empty value clears model/keyenv/key). `/provider edit bigbox` alone shows its definition (key redacted). Editing the active provider applies live |
 | `/provider remove bigbox` | delete a saved custom provider |
+| `/model` | open a selectable menu of the current provider's models: a number switches, text filters the list, `n`/`b` page long lists, and `v` opens the provider page — pick another provider there and the menu re-opens on its models |
 | `/model llama3.1:8b` | switch model: an Ollama tag, the id a server is serving, or a path to a `.gguf` file |
 | `/model ~/models/my-finetune-Q4_K_M.gguf` | run a GGUF directly: Ogun launches `llama-server` for it (provider `llama.cpp`) or imports it into Ollama (provider `ollama`) |
 
