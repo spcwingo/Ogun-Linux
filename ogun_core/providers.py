@@ -936,12 +936,17 @@ class ProviderSession:
     """
 
     def __init__(self, provider: str, host: str, model: str, timeout: Optional[float] = None,
-                 name: Optional[str] = None, api_key: Optional[str] = None) -> None:
+                 name: Optional[str] = None, api_key: Optional[str] = None,
+                 model_explicit: bool = False) -> None:
         self.provider = provider
         self.host = host.rstrip("/")
         self.model = model
         self.name = name            # display name (a custom provider's name, or a built-in's label)
         self.api_key = api_key
+        # True when the model was deliberately chosen (provider definition, --model, /model):
+        # an external server's advertised list must never override it — gateways and routers
+        # routinely serve model ids they do not list verbatim.
+        self.model_explicit = model_explicit
         self.llama_server: Optional[LlamaCppServer] = None
         self.client = create_client(provider, model=model, host=self.host, timeout=timeout,
                                     api_key=api_key, label=name)
@@ -973,17 +978,23 @@ class ProviderSession:
         except Exception:
             pass
 
-    def adopt_served_model(self) -> str:
+    def adopt_served_model(self, force: bool = False) -> str:
         """If an external server does not serve the current model name, adopt its first model.
-        Returns a note when the model changed, else ''."""
+        Returns a note when the model changed (or when an explicit model is kept despite not
+        being listed), else ''. An explicitly chosen model (definition, --model, /model) is
+        NEVER overridden: gateways/routers accept ids they don't advertise. force=True is for
+        the managed llama-server case, where the served id is by definition the loaded file."""
         if self.provider == "ollama" or not hasattr(self.client, "list_models"):
             return ""
         served = self.client.list_models()
-        if served and self.model not in served:
-            self.model = served[0]
-            self.client.model = served[0]
-            return f" Using the server's model '{served[0]}'."
-        return ""
+        if not served or self.model in served:
+            return ""
+        if self.model_explicit and not force:
+            return (f" Note: {self.label} doesn't list '{self.model}' among its served models; "
+                    "using it as configured (gateways often route ids they don't list).")
+        self.model = served[0]
+        self.client.model = served[0]
+        return f" Using the server's model '{served[0]}'."
 
     # -- GGUF activation (startup --model file.gguf and /model file.gguf) --
     def activate_gguf(self, gguf_path: Path) -> Tuple[bool, str]:
@@ -1005,7 +1016,7 @@ class ProviderSession:
             if not ok:
                 return False, detail
             self.llama_server = server
-            self.adopt_served_model()
+            self.adopt_served_model(force=True)
             return True, detail
         return False, (f"The '{self.provider}' provider talks to a running server, which loads its own models. "
                        "Use /provider llama.cpp (Ogun launches llama-server for the file) or "
@@ -1016,6 +1027,7 @@ class ProviderSession:
             self._unload_current_ollama_model()
         self.model = name
         self.client.model = name
+        self.model_explicit = True
 
     # -- Switches ------------------------------------------------------------
     def switch_provider(self, name: str, new_host: Optional[str] = None, force: bool = False) -> Tuple[bool, str]:
@@ -1062,6 +1074,9 @@ class ProviderSession:
         self.name, self.api_key = target["display"], target["api_key"]
         if target["model"]:
             self.model = str(target["model"])
+        # A model from the provider's definition is an explicit choice; a carried-over model
+        # from the previous provider is not, and may still be adopted from the server's list.
+        self.model_explicit = bool(target["model"])
         self.llama_server = server
         note = self.adopt_served_model()
         result = f"Switched to {self.label} at {host}, model '{self.model}'.{note}{key_note}"
@@ -1128,8 +1143,10 @@ class ProviderSession:
             return True, f"Model set to '{value}' (via Ollama).{warn}"
 
         served = self.client.list_models() if hasattr(self.client, "list_models") else []
+        warn = ""
         if served and value not in served:
-            return False, (f"'{value}' is not loaded on {self.label}. It currently serves: "
-                           f"{', '.join(served)}. Load the model in that app first, or pick one of those.")
+            warn = (f" Note: '{value}' is not in {self.label}'s advertised list "
+                    f"({', '.join(served)}); setting it anyway — gateways often route ids they "
+                    "don't list. If it is truly unavailable, the next inference will say so.")
         self._set_model(value)
-        return True, f"Model set to '{value}' (via {self.label})."
+        return True, f"Model set to '{value}' (via {self.label}).{warn}"

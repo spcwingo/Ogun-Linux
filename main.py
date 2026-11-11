@@ -214,7 +214,8 @@ def main() -> None:
     # The live session: provider + host + model + client, switchable mid-chat with /provider and /model.
     from pathlib import Path as _Path
     session = ProviderSession(provider, host, args.model,
-                              name=provider_target["display"], api_key=provider_target["api_key"])
+                              name=provider_target["display"], api_key=provider_target["api_key"],
+                              model_explicit=bool(args.model_explicit or provider_target["model"]))
 
     # A .gguf file as --model: import it into Ollama, or serve it with a llama-server Ogun launches.
     model_path = None

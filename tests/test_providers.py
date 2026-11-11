@@ -333,7 +333,7 @@ def test_session_switch_provider_and_model() -> None:
         ok, msg = session.switch_model("srv-2")
         assert ok and session.model == "srv-2", msg
         ok, msg = session.switch_model("not-loaded")
-        assert not ok and "srv-1" in msg and session.model == "srv-2", msg
+        assert ok and "setting it anyway" in msg and session.model == "not-loaded", msg
 
         ok, msg = session.switch_provider("bogus")
         assert not ok and session.provider == "openai", msg
@@ -633,6 +633,37 @@ def test_unset_keyenv_is_surfaced() -> None:
         assert "(NOT SET)" not in providers.provider_listing()
 
 
+def test_explicit_model_is_never_overridden() -> None:
+    env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
+        "gateway": {"host": "http://127.0.0.1:18080", "model": "kimi-k3.1-pro"},
+        "plain": {"host": "http://127.0.0.1:18080"},
+    })}
+    session = ProviderSession("ollama", "http://127.0.0.1:11434", "qwen2.5-coder:14b")
+    with patch.dict(os.environ, env), \
+         patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+        # a definition model wins over the server's advertised list (gateway behaviour:
+        # the fake server only advertises 'srv-1', like a router listing other ids)
+        ok, msg = session.switch_provider("gateway")
+        assert ok and session.model == "kimi-k3.1-pro", (msg, session.model)
+        assert session.client.model == "kimi-k3.1-pro"
+        assert "doesn't list" in msg and "as configured" in msg, msg
+        # /model to an unlisted id: allowed with a warning, not rejected
+        ok, msg = session.switch_model("some/other-model")
+        assert ok and session.model == "some/other-model" and "setting it anyway" in msg, msg
+        # a provider without a definition model still adopts the served model
+        ok, msg = session.switch_provider("plain")
+        assert ok and session.model == "srv-1", (msg, session.model)
+
+    # startup-shaped sessions: the explicit flag alone decides adoption
+    explicit = ProviderSession("openai", "http://127.0.0.1:18080", "kimi-k3.1-pro", model_explicit=True)
+    carried = ProviderSession("openai", "http://127.0.0.1:18080", "qwen2.5-coder:14b")
+    with patch("ogun_core.providers.urllib.request.urlopen", _router_urlopen):
+        note = explicit.adopt_served_model()
+        assert explicit.model == "kimi-k3.1-pro" and "as configured" in note, note
+        note = carried.adopt_served_model()
+        assert carried.model == "srv-1" and "server's model" in note, note
+
+
 def test_save_and_remove_custom_provider() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "providers.json"
@@ -802,6 +833,7 @@ def main() -> int:
         test_session_switch_to_custom_provider,
         test_literal_api_key_support,
         test_unset_keyenv_is_surfaced,
+        test_explicit_model_is_never_overridden,
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,
         test_parse_provider_command,

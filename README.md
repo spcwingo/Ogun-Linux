@@ -184,7 +184,7 @@ Then `--provider bigbox` and `/provider bigbox` just work, with that default mod
 
 Notes:
 
-- With an external server and no `--model`, Ogun uses the model that server reports as loaded.
+- With an external server and no `--model`, Ogun uses the model that server reports as loaded. A model you chose deliberately — a provider definition's model, `--model`, or `/model` — is never overridden by the server's list, and `/model` accepts ids the server doesn't advertise (with a warning): gateways and routers routinely serve model ids they don't list verbatim.
 - Hardware auto-tuning and `/vram` steer Ollama's own loading, so they apply to the Ollama provider. A llama-server that Ogun launches itself still gets its GPU layer count and context size from the active VRAM profile (`--vram max|shared|cpu`).
 - Hugging Face-format folders (safetensors) can't be served by Ogun directly: serve them with vLLM / Unsloth Studio / LM Studio and use `--provider openai`, or export a GGUF (which is what the training pipeline below produces) and run the file.
 - This closes the training loop: fine-tune with the Unsloth pipeline, and the exported GGUF in `training/data/exports` shows up in `--list-models`, ready to run via llama.cpp or Ollama.
