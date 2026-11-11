@@ -779,6 +779,54 @@ def test_anthropic_client_and_translation() -> None:
         assert len(captured2["payloads"]) == 2, captured2["payloads"]
 
 
+def test_anthropic_history_pairing_defenses() -> None:
+    """History translation must never emit an orphan tool_result: recorded calls pair
+    by their real id, a result naming a lost call gets its call re-stated, and a
+    legacy result with no recorded call anywhere is dropped (never 'toolu_unknown')."""
+    # --- engine-recorded shape: assistant tool_calls with ids + tagged results
+    system, conv = providers._to_anthropic_messages([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_7", "type": "function",
+             "function": {"name": "read_file", "arguments": {"filepath": "a.txt"}}}]},
+        {"role": "tool", "content": "file body", "tool_call_id": "call_7", "name": "read_file"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "thanks"},
+    ])
+    assert "toolu_unknown" not in json.dumps(conv), conv
+    blocks = [b for m in conv for b in m["content"]]
+    tool_use = next(b for b in blocks if b["type"] == "tool_use")
+    tool_result = next(b for b in blocks if b["type"] == "tool_result")
+    assert tool_use["id"] == "call_7" and tool_result["tool_use_id"] == "call_7", conv
+
+    # --- legacy orphan: bare tool entry, no call recorded anywhere -> dropped
+    system, conv = providers._to_anthropic_messages([
+        {"role": "user", "content": "list the files"},
+        {"role": "assistant", "content": ""},
+        {"role": "tool", "content": "orphaned result"},
+        {"role": "assistant", "content": "here you go"},
+        {"role": "user", "content": "hello again"},
+    ])
+    assert "toolu_unknown" not in json.dumps(conv), conv
+    assert not any(b["type"] == "tool_result" for m in conv for b in m["content"]), conv
+    texts = [b.get("text", "") for m in conv for b in m["content"] if b["type"] == "text"]
+    assert "hello again" in texts and "here you go" in texts, conv
+
+    # --- result names its call but the call entry is gone -> call is re-stated
+    system, conv = providers._to_anthropic_messages([
+        {"role": "user", "content": "read it"},
+        {"role": "tool", "content": "file body", "tool_call_id": "call_9", "name": "read_file"},
+        {"role": "assistant", "content": "done"},
+    ])
+    assert "toolu_unknown" not in json.dumps(conv), conv
+    blocks = [b for m in conv for b in m["content"]]
+    tool_use = next(b for b in blocks if b["type"] == "tool_use")
+    tool_result = next(b for b in blocks if b["type"] == "tool_result")
+    assert tool_use["id"] == "call_9" and tool_use["name"] == "read_file", conv
+    assert tool_result["tool_use_id"] == "call_9", conv
+
+
 def test_anthropic_custom_provider_type() -> None:
     env = {"OGUN_CUSTOM_PROVIDERS": json.dumps({
         "fcc": {"host": "http://127.0.0.1:8082", "model": "kimi-k3.1-pro",
@@ -1193,6 +1241,7 @@ def main() -> int:
         test_unset_keyenv_is_surfaced,
         test_explicit_model_is_never_overridden,
         test_anthropic_client_and_translation,
+        test_anthropic_history_pairing_defenses,
         test_anthropic_custom_provider_type,
         test_save_and_remove_custom_provider,
         test_session_add_and_remove_provider,

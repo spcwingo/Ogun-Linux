@@ -334,6 +334,9 @@ def _to_anthropic_messages(messages: List[Dict[str, Any]]) -> Tuple[str, List[Di
     same-role turns are merged (Anthropic expects alternating roles). Tool-call ids are
     preserved when the producing client supplied them and synthesized deterministically
     (toolu_1, toolu_2, ... in history order) when it did not, so results always match.
+    A result whose call is nowhere in the kept history is never emitted as an orphan
+    tool_result (strict endpoints reject those): if the result entry itself names its
+    call, the call is re-stated alongside it; otherwise the result is dropped.
     """
     system_parts: List[str] = []
     out: List[Dict[str, Any]] = []
@@ -354,7 +357,26 @@ def _to_anthropic_messages(messages: List[Dict[str, Any]]) -> Tuple[str, List[Di
                 system_parts.append(content)
             continue
         if role == "tool":
-            tool_id = pending_ids.pop(0) if pending_ids else "toolu_unknown"
+            recorded_id = msg.get("tool_call_id")
+            recorded_id = str(recorded_id) if recorded_id else ""
+            if recorded_id and recorded_id in pending_ids:
+                tool_id = recorded_id
+                pending_ids.remove(tool_id)
+            elif recorded_id:
+                # The result names its call, but the call itself is not in the
+                # kept history (pruned, or recorded by a client that stored the
+                # id only on the result): re-state the call so the pair stays
+                # matched instead of emitting an orphan tool_result.
+                tool_id = recorded_id
+                push("assistant", {"type": "tool_use", "id": tool_id,
+                                   "name": str(msg.get("name") or ""), "input": {}})
+            elif pending_ids:
+                tool_id = pending_ids.pop(0)
+            else:
+                # Orphan result: no recorded call anywhere (e.g. history written
+                # before calls were recorded). An unmatched tool_result is
+                # rejected by strict endpoints — drop the result.
+                continue
             push("user", {"type": "tool_result", "tool_use_id": tool_id,
                           "content": content if isinstance(content, str) else json.dumps(content)})
             continue

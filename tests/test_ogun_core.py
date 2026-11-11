@@ -476,6 +476,86 @@ def test_tool_rounds_limit() -> None:
             cfg.MAX_TOOL_ROUNDS = saved_rounds
 
 
+def test_engine_tool_history_recording() -> None:
+    """Tool rounds are recorded with call ids, so later history translation can pair
+    calls with results; a failed request leaves only a neutral note in history;
+    pruning never strands a tool result without its call."""
+    from ogun_core import providers as _providers
+
+    class StubClient:
+        def __init__(self, responses: List[Dict[str, Any]]) -> None:
+            self.responses = list(responses)
+
+        def chat(self, messages: List[Dict[str, Any]], tools: Any = None) -> Dict[str, Any]:
+            return self.responses.pop(0)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        (root / "sample.txt").write_text("hello world from sample", encoding="utf-8")
+
+        # Case 1: the client supplied an id (Anthropic/OpenAI shape) -> preserved
+        resp1 = {"content": "", "tool_calls": [
+            {"id": "toolu_42", "type": "function",
+             "function": {"name": "read_file", "arguments": {"filepath": "sample.txt"}}}]}
+        engine = CoreEngine(client=StubClient([resp1, {"content": "done"}]), base_dir=root)
+        out = engine.run_turn("Please read sample.txt")
+        assert "done" in out, out
+        asst = next(m for m in engine.messages if m.get("tool_calls"))
+        assert asst["tool_calls"][0]["id"] == "toolu_42", asst
+        assert asst["tool_calls"][0]["function"]["name"] == "read_file", asst
+        tool_msg = next(m for m in engine.messages if m["role"] == "tool")
+        assert tool_msg["tool_call_id"] == "toolu_42" and tool_msg["name"] == "read_file", tool_msg
+
+        # Case 2: no id from the client (Ollama shape) -> a stable id is synthesized,
+        # and the whole history converts to a matched Anthropic pair
+        resp2 = {"content": "", "tool_calls": [
+            {"function": {"name": "read_file", "arguments": {"filepath": "sample.txt"}}}]}
+        engine = CoreEngine(client=StubClient([resp2, {"content": "done"}]), base_dir=root)
+        engine.run_turn("Please read sample.txt")
+        asst = next(m for m in engine.messages if m.get("tool_calls"))
+        tool_msg = next(m for m in engine.messages if m["role"] == "tool")
+        synth_id = asst["tool_calls"][0]["id"]
+        assert synth_id and tool_msg["tool_call_id"] == synth_id, (asst, tool_msg)
+        _system, conv = _providers._to_anthropic_messages(engine.messages)
+        assert "toolu_unknown" not in json.dumps(conv), conv
+        blocks = [b for m in conv for b in m["content"]]
+        use = next(b for b in blocks if b["type"] == "tool_use")
+        res = next(b for b in blocks if b["type"] == "tool_result")
+        assert use["id"] == res["tool_use_id"] == synth_id, conv
+
+        # Case 3: client raises -> the user still sees the raw error, but history
+        # holds only the neutral note
+        class BoomClient:
+            def chat(self, messages: List[Dict[str, Any]], tools: Any = None) -> Dict[str, Any]:
+                raise RuntimeError("HTTP 400 Bad Request from fcc — server said: {\"message\": \"Invalid request\"}")
+
+        engine = CoreEngine(client=BoomClient(), base_dir=root)
+        out = engine.run_turn("Please read sample.txt")
+        assert out.startswith("Inference error: HTTP 400"), out
+        assert engine.last_turn_status["status"] == "error", engine.last_turn_status
+        assert engine.messages[-1] == {"role": "assistant",
+                                       "content": "(The previous request failed with an inference error.)"}, engine.messages[-1]
+        assert "Invalid request" not in json.dumps(engine.messages), engine.messages
+
+    # Case 4: pruning under a tight budget never leaves an orphaned tool result
+    cm = ContextManager(max_tokens=60, budget_ratio=1.0)
+    msgs = [{"role": "system", "content": "system instruction"}]
+    msgs.append({"role": "user", "content": "read the file please, with some extra words to spend budget"})
+    msgs.append({"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_1", "type": "function",
+         "function": {"name": "read_file", "arguments": {"filepath": "some/fairly/long/path.txt"}}}]})
+    msgs.append({"role": "tool", "content": "a long tool result body that spends budget " * 3,
+                 "tool_call_id": "call_1", "name": "read_file"})
+    msgs.append({"role": "assistant", "content": "the file says hello"})
+    msgs.append({"role": "user", "content": "and what else is in there, tell me more about it"})
+    pruned = cm.prune_history(msgs)
+    assert len(pruned) < len(msgs)
+    recorded = {tc["id"] for m in pruned for tc in m.get("tool_calls") or []}
+    for m in pruned:
+        if m["role"] == "tool":
+            assert m.get("tool_call_id") in recorded, pruned
+
+
 def test_codetools_operations() -> None:
     """Test codetools: read_file, write_file, replace_in_file, and check_syntax."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -846,6 +926,7 @@ def run_all_tests() -> bool:
         ("5. Dynamic Plugin Lifecycle & Registry Safety", test_plugin_lifecycle_and_registry_safety),
         ("6. Engine Turn Loop & Context Budget (Mock Client)", test_engine_turn_loop_with_mock_client),
         ("6b. Tool Rounds Limit (config default, env override, explicit arg)", test_tool_rounds_limit),
+        ("6c. Tool History Recording (call ids, error note, prune pairing)", test_engine_tool_history_recording),
         ("7. Codetools Operations (Write, Replace, Read, Syntax)", test_codetools_operations),
         ("7b. list_directory (entries, hidden, errors, schema, dispatch)", test_list_directory),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),

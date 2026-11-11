@@ -356,6 +356,14 @@ class ContextManager:
         while turns and self.estimate_tokens(([system_msg] if system_msg else []) + turns) > self.max_tokens:
             turns.pop(0)
 
+        # Never let the kept history start mid tool-round: if the assistant
+        # entry carrying the calls was pruned away, its results are orphans
+        # (no recorded call to pair with) that strict endpoints reject — drop
+        # them too. (The reverse split cannot occur: calls precede results,
+        # and pruning drops from the front.)
+        while turns and turns[0].get("role") == "tool":
+            turns.pop(0)
+
         return ([system_msg] if system_msg else []) + turns
 
 
@@ -661,7 +669,12 @@ class CoreEngine:
                 return err_msg
             except Exception as exc:
                 err_msg = f"Inference error: {exc}"
-                self.messages.append({"role": "assistant", "content": err_msg})
+                # The full error text is returned to the user (and recorded in
+                # last_turn_status below), but history gets a neutral note: the
+                # raw provider error must not ride along as a fake assistant
+                # utterance in every later request of the session.
+                self.messages.append({"role": "assistant",
+                                      "content": "(The previous request failed with an inference error.)"})
                 self.last_turn_status = {
                     "status": "error",
                     "task": user_text if clean_user not in continuation_words else self.last_turn_status.get("task", user_text),
@@ -685,7 +698,11 @@ class CoreEngine:
                                 targs = json.loads(targs)
                             except Exception:
                                 targs = {"raw": targs}
-                        tool_calls.append({"name": tname, "arguments": targs})
+                        # Keep the client's call id when it supplied one (OpenAI /
+                        # Anthropic do; Ollama does not) — the recorded history
+                        # needs it to pair the call with its result later.
+                        tool_calls.append({"name": tname, "arguments": targs,
+                                           "id": tc.get("id") or ""})
 
             if not tool_calls and content:
                 tool_calls = parse_tool_calls(content, registered_names)
@@ -709,9 +726,27 @@ class CoreEngine:
                 self.messages.append({"role": "assistant", "content": sanitized})
                 return sanitized
 
-            # Execute tool calls
-            self.messages.append({"role": "assistant", "content": content or ""})
+            # Execute tool calls. The assistant entry records the calls in the
+            # OpenAI-shaped form the provider converters consume, each with a
+            # stable id — the client's own when it supplied one, else
+            # synthesized in history order (call_1, call_2, ...) — and every
+            # result entry names the call it answers. Without the ids, history
+            # translation cannot pair calls with results and strict endpoints
+            # reject the orphaned results on every later turn of the session.
+            recorded_calls: List[Dict[str, Any]] = []
+            prior_calls = sum(len(m.get("tool_calls") or []) for m in self.messages)
             for tc in tool_calls:
+                call_id = str(tc.get("id") or "") or f"call_{prior_calls + len(recorded_calls) + 1}"
+                recorded_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc.get("arguments", {})},
+                })
+            assistant_entry: Dict[str, Any] = {"role": "assistant", "content": content or ""}
+            if recorded_calls:
+                assistant_entry["tool_calls"] = recorded_calls
+            self.messages.append(assistant_entry)
+            for tc, recorded in zip(tool_calls, recorded_calls):
                 name = tc["name"]
                 args = tc.get("arguments", {})
                 result = self.dispatch_tool(name, args, turn_events=turn_events)
@@ -719,6 +754,8 @@ class CoreEngine:
                     {
                         "role": "tool",
                         "content": str(result),
+                        "tool_call_id": recorded["id"],
+                        "name": name,
                     }
                 )
 
