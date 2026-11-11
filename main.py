@@ -11,6 +11,7 @@ from ogun_core import autotune
 from ogun_core.config import BUILD_MAX_ATTEMPTS, LLM_PROVIDER, MODEL_NAME, OLLAMA_HOST, PLUGIN_BUILDER_PROMPT
 from ogun_core.config import set_vram_profile
 from ogun_core.engine import CoreEngine, OllamaClient, handle_vram_command, is_vram_command, unload_model
+from ogun_core.lineedit import setup_history
 from ogun_core.paths import init_user_workspace
 from ogun_core.plugin_builder import build_plugin_staged, parse_code_blocks
 from ogun_core.plugin_manager import PluginManager
@@ -299,9 +300,12 @@ def main() -> None:
         sys.exit(0)
 
     # 3. Interactive CLI loop
+    line_editing = setup_history()
     print("=" * 60)
     print(f"  Ogun Autonomous Coding Assistant (Model: {session.model} via {session.label})")
     print("  Type 'exit' or 'quit' to close. Press Ctrl+C to cancel a turn.")
+    if line_editing:
+        print("  Editing: Left/Right move within the line, Up/Down recall previous entries, Ctrl+R searches history")
     if session.provider == "ollama":
         print("  GPU memory: /vram auto | /vram shared | /vram max | /vram cpu | /vram free | /vram status")
     print("  Switch anytime: /model <tag, id or .gguf path> | /provider <ollama|openai|llama.cpp|lmstudio|anthropic>")

@@ -52,6 +52,8 @@ If Ollama isn't running, Ogun tells you in plain English and exits.
 
 Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels the current turn.
 
+The prompt has bash-style line editing (via GNU readline): Left/Right arrows move within the line you are typing, so you can fix a message before sending it; Up/Down step through your previous entries; `Ctrl+R` searches them; `Ctrl+A` / `Ctrl+E` jump to the start/end of the line. Entries persist across sessions in `~/.ogun_history` (set `$OGUN_HISTORY_FILE` to use a different file).
+
 ### Command-line options
 
 | Option | What it does |
