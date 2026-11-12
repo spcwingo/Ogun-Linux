@@ -2,13 +2,13 @@
 
 **A local coding assistant that runs entirely on your own PC.** Ogun chats with a local LLM through [Ollama](https://ollama.com), writes and edits code, and can **build its own plugins**: it writes a tool plus a unit test, runs the test in an isolated process, and only mounts the tool if the test passes. It also ships a complete pipeline for fine-tuning the model on your own machine.
 
-- **Private by design**: no cloud API, no telemetry. Everything runs against your local Ollama.
+- **Private by design**: no cloud API, no telemetry. Everything runs against your local endpoint (you can again use cloud models if you so desire).
 - **Self-extending, but contained**: the AI can only write inside `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. It cannot modify Ogun itself.
 - **Plain Python and shell-script launchers**: nothing to compile, one tiny dependency (`ollama`).
 - **GPU-aware**: switch between "max speed" and "leave VRAM for other apps" with a chat command.
 
 > **Platform:** Linux (the launchers are shell scripts). The Python code itself is portable, but only Linux has been tested.
-> **Status: public beta (v0.1.0-beta).** The chat engine, plugin builder, tool builder and data pipeline are tested and working. The fine-tuning step has **not** been run end to end yet (see [Training](#training-optional)). Please [report what breaks](#feedback-and-bug-reports).
+> **Status: public beta (v0.1.0-beta).** The chat engine, plugin builder, tool builder and data pipeline are tested and working. The fine-tuning step has **not** been run end to end yet (see [Training](#training-optional)***THIS IS NO LONGER THE CASE***). Please [report what breaks](#feedback-and-bug-reports).
 
 ---
 
@@ -144,7 +144,7 @@ Idle models are released after **2 minutes** (`keep_alive`), and Ogun unloads th
 
 ## Using models from other local tools (Unsloth, Hugging Face, llama.cpp, LM Studio, ...)
 
-Ollama is the default, but Ogun can chat with models served by the other local tools you already use. Nothing leaves your machine either way.
+Ollama is the default, but Ogun can chat with models served by the other local tools you already use. Nothing leaves your machine either way (unless you choose to use cloud models, of course).
 
 **See what you have.** `./run_ogun.sh --list-models` (or `/models` in chat) scans Ollama's library, any running llama.cpp / LM Studio / vLLM server, your Hugging Face cache (`~/.cache/huggingface`), `~/models`, LM Studio's model folder, and Ogun's own training exports (`training/data/exports`) — and prints each model with the exact command that runs it. Add folders with `OGUN_MODEL_DIRS`.
 
