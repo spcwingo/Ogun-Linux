@@ -672,6 +672,71 @@ def test_dry_run_with_missing_dataset_file() -> None:
     assert ret == 1
 
 
+# ==============================================================================
+# 8. RESUME SAFETY TESTS (VALIDATION & ENGAGEMENT VERDICT)
+# ==============================================================================
+
+def test_margins_show_engagement_detects_engaged_run() -> None:
+    assert trainer._margins_show_engagement([0.0, 0.003, 0.42, 0.009, 0.001]) is True
+    assert trainer._margins_show_engagement([-1.452]) is True
+
+
+def test_margins_show_engagement_detects_flat_run() -> None:
+    # The 2026-11-12 incident signature: margins pinned at ~0 for every step.
+    assert trainer._margins_show_engagement([0.0, 0.003, 0.009, 0.0, 0.001]) is False
+    assert trainer._margins_show_engagement([]) is False
+    assert trainer._margins_show_engagement([float("nan"), 0.0]) is False
+
+
+def test_margins_show_engagement_respects_threshold() -> None:
+    assert trainer._margins_show_engagement([0.05], threshold=0.1) is False
+    assert trainer._margins_show_engagement([0.05], threshold=0.01) is True
+
+
+def test_validate_resume_checkpoint_missing_dir() -> None:
+    err = trainer._validate_resume_checkpoint("/nonexistent/path/checkpoint-600")
+    assert err is not None
+    assert "not an existing directory" in err
+    assert "checkpoint-600" in err
+
+
+def test_validate_resume_checkpoint_without_weights() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ckpt = Path(td) / "checkpoint-100"
+        ckpt.mkdir()
+        (ckpt / "trainer_state.json").write_text("{}", encoding="utf-8")
+        err = trainer._validate_resume_checkpoint(ckpt)
+        assert err is not None
+        assert "no weights file" in err
+
+
+def test_validate_resume_checkpoint_without_trainer_state() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        ckpt = Path(td) / "checkpoint-100"
+        ckpt.mkdir()
+        (ckpt / "adapter_model.safetensors").write_bytes(b"fake")
+        err = trainer._validate_resume_checkpoint(ckpt)
+        assert err is not None
+        assert "trainer_state.json" in err
+
+
+def test_validate_resume_checkpoint_valid() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        for weights_name in ("adapter_model.safetensors", "model.safetensors", "pytorch_model.bin"):
+            ckpt = Path(td) / f"ckpt-{weights_name}"
+            ckpt.mkdir()
+            (ckpt / weights_name).write_bytes(b"fake")
+            (ckpt / "trainer_state.json").write_text("{}", encoding="utf-8")
+            assert trainer._validate_resume_checkpoint(ckpt) is None
+
+
+def test_cli_resume_engagement_check_flag_default_and_value() -> None:
+    args = trainer.parse_args([])
+    assert args.no_resume_engagement_check is False
+    args = trainer.parse_args(["--no-resume-engagement-check"])
+    assert args.no_resume_engagement_check is True
+
+
 def run_all_tests() -> bool:
     tests = [
         test_vram_guard_below_11gb_refuses,
@@ -717,6 +782,14 @@ def run_all_tests() -> bool:
         test_write_ollama_modelfile,
         test_dry_run_execution,
         test_dry_run_with_missing_dataset_file,
+        test_margins_show_engagement_detects_engaged_run,
+        test_margins_show_engagement_detects_flat_run,
+        test_margins_show_engagement_respects_threshold,
+        test_validate_resume_checkpoint_missing_dir,
+        test_validate_resume_checkpoint_without_weights,
+        test_validate_resume_checkpoint_without_trainer_state,
+        test_validate_resume_checkpoint_valid,
+        test_cli_resume_engagement_check_flag_default_and_value,
     ]
 
     print("=" * 60)

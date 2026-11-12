@@ -689,7 +689,64 @@ def setup_dpo_trainer(
     }
 
     filtered_trainer = _supported_kwargs(DPOTrainer.__init__, trainer_candidates)
-    return DPOTrainer(**filtered_trainer)
+    dpo_trainer = DPOTrainer(**filtered_trainer)
+
+    if getattr(args, "resume_from_checkpoint", None) and not getattr(
+        args, "no_resume_engagement_check", False
+    ):
+        # Resume engagement guard. A resume can silently restore weights and
+        # optimizer state yet never engage the adapter in the forward pass;
+        # training then logs loss ~= ln(2) with rewards/margins ~= 0 for the
+        # whole run (observed 2026-11-12: 150 dead steps after resuming a
+        # crashed overnight run). Watch the first logged margins and abort
+        # while aborting is still cheap. transformers is imported here, at
+        # the point of use, like trl/unsloth above.
+        from transformers import TrainerCallback
+
+        class ResumeEngagementGuard(TrainerCallback):
+            """Abort a resumed run whose logged margins show policy == reference."""
+
+            _SAMPLES_NEEDED = 5
+
+            def __init__(self) -> None:
+                self._margins: List[float] = []
+
+            def _verdict(self) -> None:
+                if self._margins and not _margins_show_engagement(self._margins):
+                    raise RuntimeError(
+                        "Resume engagement check FAILED: the first "
+                        f"{len(self._margins)} logged rewards/margins of this "
+                        "resumed run are all ~0, meaning the policy model is "
+                        "indistinguishable from the reference model — the "
+                        "adapter is not engaged and no learning is happening. "
+                        "Aborting now instead of wasting GPU hours; the "
+                        "resume checkpoint is untouched and preserved. "
+                        "Re-run with --no-resume-engagement-check to bypass "
+                        "this guard."
+                    )
+
+            def on_log(self, args, state, control, **kwargs):  # noqa: ANN001, ANN202
+                logs = kwargs.get("logs") or {}
+                if "rewards/margins" in logs and len(self._margins) < self._SAMPLES_NEEDED:
+                    try:
+                        self._margins.append(float(logs["rewards/margins"]))
+                    except (TypeError, ValueError):
+                        pass
+                    if len(self._margins) >= self._SAMPLES_NEEDED:
+                        self._verdict()
+
+            def on_train_end(self, args, state, control, **kwargs):  # noqa: ANN001, ANN202
+                # Short runs may end before 5 log entries arrive.
+                self._verdict()
+
+        dpo_trainer.add_callback(ResumeEngagementGuard())
+        logger.info(
+            "Resume engagement guard armed: the first %d logged rewards/margins "
+            "must show the adapter is engaged (disable with --no-resume-engagement-check).",
+            ResumeEngagementGuard._SAMPLES_NEEDED,
+        )
+
+    return dpo_trainer
 
 
 # ==============================================================================
@@ -906,6 +963,60 @@ def run_dry_run(args: argparse.Namespace) -> int:
 
 
 # ==============================================================================
+# 6b. RESUME SAFETY (FAIL-FAST VALIDATION & ENGAGEMENT GUARD)
+# ==============================================================================
+
+_RESUME_WEIGHT_FILES = (
+    "adapter_model.safetensors",
+    "model.safetensors",
+    "pytorch_model.bin",
+)
+
+
+def _validate_resume_checkpoint(path: Any) -> Optional[str]:
+    """Validate a --resume-from-checkpoint directory before any expensive work.
+
+    Returns None when the checkpoint looks resumable, otherwise a
+    human-readable error string naming the resolved absolute path. Trainer's
+    own "Can't find a valid checkpoint" only surfaces inside trainer.train(),
+    after the dataset and the model have already been loaded — this check
+    fails in seconds instead, and says what is actually missing.
+    """
+    ckpt = Path(path).expanduser()
+    resolved = ckpt.resolve()
+    if not ckpt.is_dir():
+        return f"resume checkpoint is not an existing directory: {resolved}"
+    if not any((ckpt / name).is_file() for name in _RESUME_WEIGHT_FILES):
+        return (
+            f"resume checkpoint {resolved} contains no weights file "
+            f"(expected one of: {', '.join(_RESUME_WEIGHT_FILES)})"
+        )
+    if not (ckpt / "trainer_state.json").is_file():
+        return (
+            f"resume checkpoint {resolved} is missing trainer_state.json "
+            "(Trainer cannot restore step count, optimizer, or scheduler state without it)"
+        )
+    return None
+
+
+def _margins_show_engagement(margins: Any, threshold: float = 0.01) -> bool:
+    """True when at least one logged rewards/margins value exceeds threshold.
+
+    DPO margins compare the policy against the reference model: margins stuck
+    at ~0 mean policy == reference, i.e. the adapter is not engaged and the
+    run is computing nothing. NaN margins never count as engagement.
+    """
+    for margin in margins:
+        try:
+            value = abs(float(margin))
+        except (TypeError, ValueError):
+            continue
+        if value > threshold:
+            return True
+    return False
+
+
+# ==============================================================================
 # 7. CLI ENTRY POINT & MAIN
 # ==============================================================================
 
@@ -1083,6 +1194,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Path to checkpoint directory to resume training from.",
     )
+    parser.add_argument(
+        "--no-resume-engagement-check",
+        action="store_true",
+        help=(
+            "Disable the resume engagement guard: by default a resumed run "
+            "aborts if its first logged rewards/margins show the adapter is "
+            "not engaged (policy == reference, loss ~= ln 2)."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.quantization_method != "f16" and args.gguf_quant == "f16":
         args.gguf_quant = args.quantization_method
@@ -1109,6 +1229,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("DISK SPACE PRE-FLIGHT REJECTED EXECUTION: %s", disk_msg)
         return 1
     logger.info(disk_msg)
+
+    # 2b. Resume Checkpoint Validation (fail fast, before dataset/model loads)
+    if args.resume_from_checkpoint:
+        resume_error = _validate_resume_checkpoint(args.resume_from_checkpoint)
+        if resume_error:
+            logger.error("RESUME CHECKPOINT REJECTED: %s", resume_error)
+            return 2
+        logger.info(
+            "Resume checkpoint validated: %s",
+            Path(args.resume_from_checkpoint).expanduser().resolve(),
+        )
 
     # 3. Load Dataset File
     train_rows, eval_rows = load_dataset_file(args.dataset_file, max_train_rows=args.max_train_rows)
