@@ -658,7 +658,13 @@ def setup_dpo_trainer(
         "max_steps": args.max_steps,
         "seed": args.seed,
         "save_steps": args.save_steps,
-        "save_total_limit": 2,
+        # 0/negative --save-total-limit means keep ALL checkpoints (None =
+        # no rotation). Rotation is opt-in only: checkpoints are the only
+        # crash recovery, and the old hardcoded limit of 2 let a resumed run
+        # delete the very checkpoint it had resumed from.
+        "save_total_limit": (
+            args.save_total_limit if getattr(args, "save_total_limit", 0) > 0 else None
+        ),
         "logging_steps": 1,
         "fp16": not bf16_ok,
         "bf16": bf16_ok,
@@ -1030,6 +1036,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=100,
         help="Checkpoint every N steps. Default: 100.",
+    )
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=0,
+        help=(
+            "Maximum number of checkpoints to keep in the output directory; "
+            "older checkpoints are deleted as new ones are saved. 0 (or "
+            "negative) keeps ALL checkpoints. Default: 0 (keep all). "
+            "Checkpoints are the only crash recovery: the previous hardcoded "
+            "limit of 2 let a resumed run's rotation delete the checkpoint "
+            "it had resumed from, destroying the fallback."
+        ),
     )
     parser.add_argument(
         "--skip-gguf",

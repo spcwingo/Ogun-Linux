@@ -520,6 +520,36 @@ def test_setup_dpo_trainer_adapts_to_old_trl_api() -> None:
             assert created["tokenizer"] is tok
 
 
+def test_setup_dpo_trainer_save_total_limit_wiring() -> None:
+    mods, created = _install_fake_stack(new_api=True)
+    with patch.dict(sys.modules, mods):
+        tok = object()
+        with tempfile.TemporaryDirectory() as td:
+            # Default (0) keeps ALL checkpoints: DPOConfig gets None (no rotation).
+            args = trainer.parse_args([])
+            trainer.setup_dpo_trainer(
+                model="M",
+                tokenizer=tok,
+                train_dataset=[1],
+                eval_dataset=None,
+                output_dir=Path(td),
+                args=args,
+            )
+            assert created["args"].save_total_limit is None
+
+            # A positive limit is passed through as the rotation cap.
+            args = trainer.parse_args(["--save-total-limit", "3"])
+            trainer.setup_dpo_trainer(
+                model="M",
+                tokenizer=tok,
+                train_dataset=[1],
+                eval_dataset=None,
+                output_dir=Path(td),
+                args=args,
+            )
+            assert created["args"].save_total_limit == 3
+
+
 def test_supported_kwargs_drops_unknown_options_and_keeps_var_kwargs_targets() -> None:
     def fn1(a: int, b: int = 1) -> int:
         return a
@@ -553,6 +583,15 @@ def test_cli_exposes_the_documented_flags() -> None:
     assert args.gguf_quant == "q4_k_m"
     assert args.force is True
     assert args.dry_run is True
+
+
+def test_cli_save_total_limit_default_and_value() -> None:
+    args = trainer.parse_args([])
+    assert args.save_total_limit == 0
+    args = trainer.parse_args(["--save-total-limit", "5"])
+    assert args.save_total_limit == 5
+    args = trainer.parse_args(["--save-total-limit", "-1"])
+    assert args.save_total_limit == -1
 
 
 # ==============================================================================
@@ -666,6 +705,8 @@ def run_all_tests() -> bool:
         test_export_fallback_on_gguf_failure,
         test_setup_dpo_trainer_adapts_to_new_trl_api,
         test_setup_dpo_trainer_adapts_to_old_trl_api,
+        test_setup_dpo_trainer_save_total_limit_wiring,
+        test_cli_save_total_limit_default_and_value,
         test_supported_kwargs_drops_unknown_options_and_keeps_var_kwargs_targets,
         test_cli_exposes_the_documented_flags,
         test_load_dataset_file_success,
