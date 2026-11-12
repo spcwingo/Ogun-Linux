@@ -16,6 +16,10 @@ Dataset registry notes:
   5. `HuggingFaceH4/ultrafeedback_binarized` (split train_prefs; rows API)
   6. `argilla/dpo-mix-7k` (split train; rows API; prefix mismatch filtering)
   7. `voxozi/agentforge-multiturn-toolcall` (SFT tool-calling; synthetic preference pairs via 4 corruptions)
+- Shell datasets (opt-in, SFT; synthetic preference pairs via POSIX/BusyBox-flavored corruptions):
+  8. `AnishJoshi/nl2bash-custom` (direct download JSON array; NL2Bash + NLC2CMD commands)
+  9. `ise-uiuc/Magicoder-OSS-Instruct-75K` (direct download JSONL; only the lang=shell subset
+     whose solution is an explicitly bash/sh-tagged code block)
 """
 
 from __future__ import annotations
@@ -591,6 +595,200 @@ class AgentForgePreferenceBuilder:
 
 
 # ==============================================================================
+# 3b. SHELL SFT -> SYNTHETIC PREFERENCE PAIR BUILDER
+# ==============================================================================
+
+class ShellCorruptor:
+    """Deterministic corruptions that make a shell answer plausibly worse.
+
+    Tuned for POSIX / BusyBox discipline (the shell dialect of init scripts,
+    boot scripts and minimal live environments, where bash features fail
+    silently or loudly):
+
+    1. Bashism injection: `#!/bin/sh` -> `#!/bin/bash`, `[ ... ]` ->
+       `[[ ... ]]`, plain `name() {` -> `function name() {`.
+    2. Unquoting: `"$VAR"` -> `$VAR`, `"$@"` -> `$@`, `"$(...)"` -> `$(...)`
+       (word splitting / glob expansion hazards).
+    3. Error-handling strip: drop `set -e`-style lines, drop `|| exit` /
+       `|| return` guards, turn `&&` chains into `;` sequences.
+    4. Wrong operator/flag swaps: `-eq` <-> `-ne`, `-lt` <-> `-gt`,
+       `-ge` <-> `-le`, `find -type f` <-> `-type d`, `[ -f x ]` <-> `[ -d x ]`.
+    5. Pipeline truncation: drop the final stage of a pipeline.
+
+    Each op returns the corrupted text, or None when it does not apply.
+    `corrupt()` tries the ops in a rotating order driven by a per-instance
+    counter, so a whole pipeline run is reproducible from the seed alone.
+    An op never returns its input unchanged.
+    """
+
+    _NUMERIC_TEST_SWAPS = [
+        ("-eq", "-ne"), ("-ne", "-eq"),
+        ("-lt", "-gt"), ("-gt", "-lt"),
+        ("-ge", "-le"), ("-le", "-ge"),
+    ]
+
+    def __init__(self, seed: int = DEFAULT_SEED):
+        self.seed = seed
+        self.corruption_counter = 0
+
+    # -- op 1: bashisms ------------------------------------------------------
+    def corrupt_bashism(self, text: str) -> Optional[str]:
+        # Shebang swap: #!/bin/sh (or env sh) -> bash
+        new, n = re.subn(r"#!(/usr/bin/env\s+)?/bin/sh\b", r"#!\1/bin/bash", text, count=1)
+        if n and new != text:
+            return new
+        new, n = re.subn(r"#!/usr/bin/env\s+sh\b", "#!/usr/bin/env bash", text, count=1)
+        if n and new != text:
+            return new
+        # POSIX function definition -> bash-only `function` keyword form
+        new, n = re.subn(
+            r"(?m)^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{",
+            r"\1function \2() {",
+            text,
+            count=1,
+        )
+        if n and new != text:
+            return new
+        # [ ... ] test -> [[ ... ]]
+        new, n = re.subn(
+            r"(^|[\s;(!])\[ ([^\[\]\n]+) \]",
+            r"\1[[ \2 ]]",
+            text,
+            count=1,
+            flags=re.M,
+        )
+        if n and new != text:
+            return new
+        return None
+
+    # -- op 2: unquoting ------------------------------------------------------
+    def corrupt_unquoting(self, text: str) -> Optional[str]:
+        patterns = [
+            (r'"\$@"', "$@"),
+            (r'"\$\*"', "$*"),
+            (r'"\$\(([^()]*)\)"', r"$(\1)"),
+            (r'"\$(\{[A-Za-z_][A-Za-z0-9_]*\})"', r"$\1"),
+            (r'"\$([A-Za-z_][A-Za-z0-9_]*)"', r"$\1"),
+        ]
+        for pattern, repl in patterns:
+            new, n = re.subn(pattern, repl, text, count=1)
+            if n and new != text:
+                return new
+        return None
+
+    # -- op 3: strip error handling -------------------------------------------
+    def corrupt_strip_error_handling(self, text: str) -> Optional[str]:
+        # Drop a `set -e` / `set -eu` / `set -euo pipefail` line entirely
+        new, n = re.subn(r"(?m)^[ \t]*set\s+-[a-zA-Z]*e[a-zA-Z]*\b[^\n]*\n?", "", text, count=1)
+        if n and new.strip() and new != text:
+            return new
+        # Drop an `|| exit` / `|| return` guard
+        new, n = re.subn(r"\s*\|\|\s*(?:exit|return)(\s+\d+)?\b", "", text, count=1)
+        if n and new != text:
+            return new
+        # && chains become ; sequences (later commands run even after failure)
+        if " && " in text:
+            new = text.replace(" && ", "; ")
+            if new != text:
+                return new
+        return None
+
+    # -- op 4: wrong operator / flag -------------------------------------------
+    def corrupt_wrong_operator(self, text: str) -> Optional[str]:
+        # find -type f <-> -type d
+        new, n = re.subn(r"-type\s+f\b", "-type d", text, count=1)
+        if n and new != text:
+            return new
+        new, n = re.subn(r"-type\s+d\b", "-type f", text, count=1)
+        if n and new != text:
+            return new
+        # [ -f x ] <-> [ -d x ] (also `test -f x`)
+        new, n = re.subn(r"(\[|test)\s+-f\s", lambda m: m.group(0).replace("-f", "-d"), text, count=1)
+        if n and new != text:
+            return new
+        new, n = re.subn(r"(\[|test)\s+-d\s", lambda m: m.group(0).replace("-d", "-f"), text, count=1)
+        if n and new != text:
+            return new
+        # Numeric test comparisons
+        for old, new_op in self._NUMERIC_TEST_SWAPS:
+            if re.search(rf"\s{re.escape(old)}\s", text):
+                new = re.sub(rf"\s{re.escape(old)}\s", f" {new_op} ", text, count=1)
+                if new != text:
+                    return new
+        return None
+
+    # -- op 5: pipeline truncation ----------------------------------------------
+    @staticmethod
+    def _unquoted_pipe_positions(line: str) -> List[int]:
+        """Positions of pipeline `|` operators: not part of `||`, not escaped,
+        and not inside single/double quotes (a `|` inside a quoted grep
+        pattern is data, not a pipeline stage)."""
+        positions: List[int] = []
+        in_single = False
+        in_double = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if in_single:
+                if ch == "'":
+                    in_single = False
+            elif in_double:
+                if ch == "\\":
+                    i += 1
+                elif ch == '"':
+                    in_double = False
+            else:
+                if ch == "'":
+                    in_single = True
+                elif ch == '"':
+                    in_double = True
+                elif ch == "\\":
+                    i += 1
+                elif ch == "|":
+                    prev_ok = i == 0 or line[i - 1] != "|"
+                    next_ok = i + 1 >= len(line) or line[i + 1] != "|"
+                    if prev_ok and next_ok:
+                        positions.append(i)
+            i += 1
+        return positions
+
+    def corrupt_truncate_pipeline(self, text: str) -> Optional[str]:
+        lines = text.split("\n")
+        for idx, line in enumerate(lines):
+            pipe_positions = self._unquoted_pipe_positions(line)
+            if not pipe_positions:
+                continue
+            head = line[:pipe_positions[-1]].rstrip()
+            if not head:
+                continue
+            lines[idx] = head
+            new = "\n".join(lines)
+            if new != text:
+                return new
+        return None
+
+    # -- driver -------------------------------------------------------------------
+    def corrupt(self, text: str) -> Optional[str]:
+        """Return a corrupted variant of `text`, or None if no op applies."""
+        if not text or not text.strip():
+            return None
+        ops = [
+            self.corrupt_bashism,
+            self.corrupt_unquoting,
+            self.corrupt_strip_error_handling,
+            self.corrupt_wrong_operator,
+            self.corrupt_truncate_pipeline,
+        ]
+        start = self.corruption_counter % len(ops)
+        self.corruption_counter += 1
+        for k in range(len(ops)):
+            out = ops[(start + k) % len(ops)](text)
+            if out is not None and out != text:
+                return out
+        return None
+
+
+# ==============================================================================
 # 4. DATASET MAPPERS & REGISTRY
 # ==============================================================================
 
@@ -604,6 +802,11 @@ class DatasetSource:
     required: bool
     url_or_file: str
     description: str
+    # Loaders may stream up to max_per_source * raw_scan_multiplier raw rows.
+    # >1 for sources whose mapper keeps only a small subset of raw rows
+    # (e.g. one language out of a multilingual file), so the kept-record cap
+    # is not starved by the loader stopping early.
+    raw_scan_multiplier: int = 1
 
 
 SOURCE_REGISTRY: List[DatasetSource] = [
@@ -686,6 +889,32 @@ SOURCE_REGISTRY: List[DatasetSource] = [
         required=True,
         url_or_file="https://huggingface.co/datasets/voxozi/agentforge-multiturn-toolcall/resolve/main/train.jsonl",
         description="Multiturn agent tool-calling SFT dataset converted to synthetic preference pairs.",
+    ),
+    DatasetSource(
+        id="AnishJoshi/nl2bash-custom",
+        short_name="nl2bash",
+        loader_type="direct_download",
+        split="train",
+        enabled_by_default=False,
+        required=False,
+        url_or_file="https://huggingface.co/datasets/AnishJoshi/nl2bash-custom/resolve/main/data/train.json",
+        description="NL2Bash + NLC2CMD natural-language-to-bash one-liners (SFT; rejected answers are synthesized POSIX/BusyBox-flavored corruptions).",
+        # Many one-liners are too plain for any corruption to apply (~40% of
+        # rows); scan past them so the kept-record cap stays reachable.
+        raw_scan_multiplier=3,
+    ),
+    DatasetSource(
+        id="ise-uiuc/Magicoder-OSS-Instruct-75K",
+        short_name="magicoder_shell",
+        loader_type="direct_download",
+        split="train",
+        enabled_by_default=False,
+        required=False,
+        url_or_file="https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K/resolve/main/data-oss_instruct-decontaminated.jsonl",
+        description="Magicoder OSS-Instruct shell subset: lang=shell rows whose solution is an explicitly bash/sh-tagged code block (SFT; rejected answers are synthesized POSIX/BusyBox-flavored corruptions).",
+        # Only ~3% of raw rows are usable shell pairs; scan deep enough to
+        # reach the kept-record cap (the whole file, at large caps).
+        raw_scan_multiplier=100,
     ),
 ]
 
@@ -836,6 +1065,91 @@ def map_dpo_mix_row(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "chosen": chosen_str,
         "rejected": rejected_str,
         "pair_type": "original",
+    }
+
+
+def map_nl2bash_row(
+    item: Dict[str, Any],
+    corruptor: Optional[ShellCorruptor] = None,
+) -> Optional[Dict[str, Any]]:
+    """NL2Bash-custom row: {srno, nl_command, bash_code} (SFT, no rejected).
+
+    The rejected answer is synthesized by corrupting the reference command
+    with POSIX/BusyBox-flavored corruptions (see ShellCorruptor). Rows whose
+    command no corruption applies to are skipped.
+    """
+    instruction = str(item.get("nl_command") or "").strip()
+    command = str(item.get("bash_code") or "").strip()
+
+    if not instruction or not command:
+        return None
+
+    rejected = (corruptor or ShellCorruptor()).corrupt(command)
+    if not rejected or rejected == command:
+        return None
+
+    return {
+        "prompt_messages": [{"role": "user", "content": instruction}],
+        "chosen": command,
+        "rejected": rejected,
+        "pair_type": "synthetic",
+    }
+
+
+_SHELL_FENCE_RE = re.compile(r"```([A-Za-z0-9_+\-]*)\s*\n(.*?)```", re.S)
+_SHELL_FENCE_TAGS = {"bash", "sh", "shell"}
+
+
+def extract_shell_code(solution: str) -> Optional[str]:
+    """Extract a shell script from a Magicoder solution's fenced code block.
+
+    The dataset's `lang` field alone is not trustworthy for the shell
+    subset (many lang=shell rows are solved in Python), so only a block
+    explicitly tagged bash/sh/shell counts. Returns the bare code, matching
+    the vezora/cybernative convention of unfenced completions.
+    """
+    if not solution:
+        return None
+    for m in _SHELL_FENCE_RE.finditer(solution):
+        if m.group(1).strip().lower() in _SHELL_FENCE_TAGS:
+            code = m.group(2).strip()
+            if code:
+                return code
+    return None
+
+
+def map_magicoder_shell_row(
+    item: Dict[str, Any],
+    corruptor: Optional[ShellCorruptor] = None,
+) -> Optional[Dict[str, Any]]:
+    """Magicoder OSS-Instruct row: {lang, problem, solution} (SFT, no rejected).
+
+    Keeps only shell rows: lang must be shell/sh/bash AND the solution must
+    contain an explicitly shell-tagged code block (see extract_shell_code).
+    The rejected answer is a synthesized corruption of the extracted code.
+    """
+    lang = str(item.get("lang") or "").strip().lower()
+    if lang not in ("shell", "sh", "bash"):
+        return None
+
+    problem = str(item.get("problem") or "").strip()
+    solution = str(item.get("solution") or "")
+    if not problem or not solution:
+        return None
+
+    code = extract_shell_code(solution)
+    if not code:
+        return None
+
+    rejected = (corruptor or ShellCorruptor()).corrupt(code)
+    if not rejected or rejected == code:
+        return None
+
+    return {
+        "prompt_messages": [{"role": "user", "content": problem}],
+        "chosen": code,
+        "rejected": rejected,
+        "pair_type": "synthetic",
     }
 
 
@@ -1051,6 +1365,45 @@ def load_direct_download(
 
     # Stream download line by line or file with range support for small caps
     try:
+        # JSON-array files (e.g. nl2bash-custom's train.json) cannot be parsed
+        # by the line-streaming path below: detect one with a 1 KB probe and
+        # load it whole instead. The cache-read path above already handles
+        # arrays, so write the body verbatim and mark the cache complete.
+        array_body: Optional[bytes] = None
+        array_items: Optional[List[Dict[str, Any]]] = None
+        try:
+            probe_req = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-1023"}
+            )
+            with urllib.request.urlopen(probe_req, timeout=30) as probe_resp:
+                probe_text = probe_resp.read().decode("utf-8", errors="replace").lstrip()
+            if probe_text.startswith("["):
+                _, raw_body, _ = _http_get(url, timeout=120)
+                parsed = json.loads(raw_body.decode("utf-8", errors="replace"))
+                if isinstance(parsed, list):
+                    array_body = raw_body
+                    array_items = [it for it in parsed if isinstance(it, dict)]
+        except Exception:
+            array_body, array_items = None, None
+
+        if array_items is not None and array_body is not None:
+            temp_path = local_path.with_suffix(".tmp")
+            with open(temp_path, "wb") as out_f:
+                out_f.write(array_body)
+            os.replace(temp_path, local_path)
+            try:
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump({"rows": len(array_items), "complete": True}, mf)
+            except Exception:
+                pass
+            count = 0
+            for item in array_items:
+                count += 1
+                yield item
+                if count >= max_rows:
+                    return
+            return
+
         req_headers = {"User-Agent": USER_AGENT}
         if max_rows <= 100:
             # Use Range request to avoid transferring large files (e.g. Vezora 213MB)
@@ -1202,19 +1555,22 @@ def process_dataset(
     seen_pairs: Set[str],
     builder: AgentForgePreferenceBuilder,
     quiet: bool = False,
+    shell_corruptor: Optional[ShellCorruptor] = None,
 ) -> List[Dict[str, Any]]:
     """Process a single dataset source from raw loader to normalized DPO records."""
+    shell_corruptor_local = shell_corruptor or ShellCorruptor(seed=seed)
+    loader_max_rows = max_per_source * max(1, source.raw_scan_multiplier)
     raw_generator = None
     if source.loader_type == "direct_download":
         raw_generator = load_direct_download(
-            source.id, source.url_or_file, max_per_source, cache_dir, offline, refresh, quiet
+            source.id, source.url_or_file, loader_max_rows, cache_dir, offline, refresh, quiet
         )
     elif source.loader_type == "rows_api":
         raw_generator = load_rows_api(
-            source.id, source.split, max_per_source, cache_dir, offline, refresh, quiet
+            source.id, source.split, loader_max_rows, cache_dir, offline, refresh, quiet
         )
     elif source.loader_type == "datasets":
-        raw_generator = load_datasets_library(source.id, source.split, max_per_source, quiet)
+        raw_generator = load_datasets_library(source.id, source.split, loader_max_rows, quiet)
 
     if raw_generator is None:
         return []
@@ -1252,6 +1608,14 @@ def process_dataset(
                 mapped_items.append(res)
         elif source.short_name == "agentforge":
             mapped_items = builder.build_preference_pairs(raw_row)
+        elif source.short_name == "nl2bash":
+            res = map_nl2bash_row(raw_row, shell_corruptor_local)
+            if res:
+                mapped_items.append(res)
+        elif source.short_name == "magicoder_shell":
+            res = map_magicoder_shell_row(raw_row, shell_corruptor_local)
+            if res:
+                mapped_items.append(res)
         else:
             # Generic fallback
             p = raw_row.get("prompt")
@@ -1418,6 +1782,7 @@ def run_pipeline(
 
     rng = random.Random(seed)
     builder = AgentForgePreferenceBuilder(seed=seed)
+    shell_corruptor = ShellCorruptor(seed=seed)
 
     # Determine sources to run
     registry_map = {s.short_name: s for s in SOURCE_REGISTRY}
@@ -1466,6 +1831,7 @@ def run_pipeline(
                 seen_pairs=seen_pairs,
                 builder=builder,
                 quiet=quiet,
+                shell_corruptor=shell_corruptor,
             )
         except Exception as e:
             logger.warning("Source %s failed with unexpected error: %s", source.id, e)
@@ -1816,6 +2182,30 @@ def get_selftest_fixtures() -> Dict[str, List[Dict[str, Any]]]:
                 ],
             }
         ],
+        "nl2bash": [
+            {
+                "srno": 1,
+                "nl_command": "Find all regular files modified in the last 2 days",
+                "bash_code": "find . -type f -mtime -2",
+            },
+            {
+                "srno": 2,
+                "nl_command": "Print the value of the PATH variable",
+                "bash_code": "echo \"$PATH\"",
+            },
+        ],
+        "magicoder_shell": [
+            {
+                "lang": "shell",
+                "problem": "Write a shell script that echoes each of its arguments on its own line.",
+                "solution": "```bash\n#!/bin/sh\nfor f in \"$@\"; do\n    echo \"$f\"\ndone\n```\n\nThe loop echoes each argument in turn.",
+            },
+            {
+                "lang": "shell",
+                "problem": "Write a Python function that adds two numbers.",
+                "solution": "```python\ndef add(a, b):\n    return a + b\n```",
+            },
+        ],
     }
 
 
@@ -1850,6 +2240,17 @@ def run_selftest() -> bool:
             for row in fixtures["agentforge"]:
                 f.write(json.dumps(row) + "\n")
 
+        nl2b_dir = cache_dir / "AnishJoshi_nl2bash-custom"
+        nl2b_dir.mkdir(parents=True, exist_ok=True)
+        with open(nl2b_dir / "train.json", "w", encoding="utf-8") as f:
+            json.dump(fixtures["nl2bash"], f)
+
+        mc_dir = cache_dir / "ise-uiuc_Magicoder-OSS-Instruct-75K"
+        mc_dir.mkdir(parents=True, exist_ok=True)
+        with open(mc_dir / "data-oss_instruct-decontaminated.jsonl", "w", encoding="utf-8") as f:
+            for row in fixtures["magicoder_shell"]:
+                f.write(json.dumps(row) + "\n")
+
         # Mock rows API cache files
         jd_dir = cache_dir / "jondurbin_py-dpo-v0.1"
         jd_dir.mkdir(parents=True, exist_ok=True)
@@ -1872,7 +2273,7 @@ def run_selftest() -> bool:
         # Run pipeline in offline mode against mock files
         print("\nRunning pipeline offline against fixtures...")
         count, out_p, stats_p = run_pipeline(
-            sources_to_run=["vezora", "jondurbin", "cybernative", "ultrafeedback", "dpo_mix_7k", "agentforge"],
+            sources_to_run=["vezora", "jondurbin", "cybernative", "ultrafeedback", "dpo_mix_7k", "agentforge", "nl2bash", "magicoder_shell"],
             max_per_source=50,
             out_path=out_file,
             cache_dir=cache_dir,

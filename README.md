@@ -304,10 +304,13 @@ Downloads preference datasets, cleans and filters them, and writes `training/dat
 | `argilla/dpo-mix-7k` | general chat |
 | `voxozi/agentforge-multiturn-toolcall` | tool calling (**synthetic** pairs, see below) |
 | `lvwerra/stack-exchange-paired` | only if the `datasets` package is installed |
+| `AnishJoshi/nl2bash-custom` | shell commands (**synthetic** pairs, opt-in: `--sources nl2bash`) |
+| `ise-uiuc/Magicoder-OSS-Instruct-75K` | shell scripts, Magicoder shell subset only (**synthetic** pairs, opt-in: `--sources magicoder_shell`) |
 
 Notes:
 - `kashif/StackExchange_Code_DPO` is listed in the registry but **does not exist on Hugging Face**; the coding sources above replace it. A missing source is skipped with a warning.
 - The agentforge dataset has no "rejected" answers, so Ogun builds them deterministically by corrupting the real tool call (wrong tool, dropped required argument, claiming success without calling the tool, ignoring a real tool error). These are marked `pair_type: synthetic`.
+- The two shell sources are SFT datasets too, so their "rejected" answers are likewise synthesized — with corruptions tuned for POSIX/BusyBox shell discipline (the dialect of boot and init scripts): injected bashisms (`#!/bin/sh` → `#!/bin/bash`, `[ ]` → `[[ ]]`, the `function` keyword), dropped quoting (`"$VAR"` → `$VAR`), stripped error handling (`set -e`, `|| exit`, `&&` chains), wrong test/find operators, and truncated pipelines. Magicoder's `lang` field is not trusted on its own (many `lang: shell` rows are solved in Python); only rows whose solution is an explicitly `bash`/`sh`-tagged code block are kept. Merge a shell dataset with the general one using `training/merge_dpo_datasets.py`.
 - Prompts are rendered in Qwen's chat format (with the tool definitions for tool pairs), because DPO only makes sense on prompts that look like what the model sees at inference.
 - **Check each dataset's license** before you train on it or redistribute anything derived from it. No data is included in this repository.
 

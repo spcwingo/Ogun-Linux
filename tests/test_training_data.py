@@ -2,7 +2,9 @@
 
 Tests:
 - All dataset mappers (Vezora, jondurbin, CyberNative, stack-exchange, UltraFeedback, dpo-mix)
+- Shell mappers (NL2Bash, Magicoder shell subset) and the ShellCorruptor (5 POSIX/BusyBox corruption ops, determinism)
 - AgentForge synthetic preference builder (4 corruption modes, seed determinism, tool error guard)
+- merge_dpo_datasets tool (dedupe, stratified split, stats, verifier round-trip)
 - Qwen ChatML & Plain prompt rendering
 - clean_text and markdown fence repair (even, truncated opening, stray odd)
 - Length filters, deduplication, and refusal boilerplate detection
@@ -290,6 +292,182 @@ def test_agentforge_determinism():
     pairs1 = b1.build_preference_pairs(item)
     pairs2 = b2.build_preference_pairs(item)
     assert pairs1 == pairs2, "AgentForge pair generation must be completely deterministic for same seed"
+
+
+# ==============================================================================
+# 2b. SHELL MAPPERS & CORRUPTOR TESTS
+# ==============================================================================
+
+def test_nl2bash_mapper():
+    row = {
+        "srno": 3194,
+        "nl_command": "Look for any files that were modified 2-5 days ago",
+        "bash_code": "find . -type f -mtime +2 -mtime -5",
+    }
+    mapped = ptd.map_nl2bash_row(row, ptd.ShellCorruptor(seed=1))
+    assert mapped is not None
+    assert mapped["prompt_messages"] == [{"role": "user", "content": row["nl_command"]}]
+    assert mapped["chosen"] == row["bash_code"]
+    assert mapped["pair_type"] == "synthetic"
+    # -type f -> -type d is one of the seeded corruptions; any case, rejected differs
+    assert mapped["rejected"] != mapped["chosen"]
+
+    # Quoting corruption applies to a quoted variable expansion
+    row_q = {"srno": 2, "nl_command": "Print PATH", "bash_code": "echo \"$PATH\""}
+    mapped_q = ptd.map_nl2bash_row(row_q, ptd.ShellCorruptor(seed=1))
+    assert mapped_q is not None
+    assert mapped_q["rejected"] == "echo $PATH"
+
+    # Missing fields are skipped
+    assert ptd.map_nl2bash_row({"nl_command": "", "bash_code": "ls"}, ptd.ShellCorruptor()) is None
+    assert ptd.map_nl2bash_row({"nl_command": "list files", "bash_code": ""}, ptd.ShellCorruptor()) is None
+
+    # A command no corruption applies to is skipped, never passed through unchanged
+    assert ptd.map_nl2bash_row({"nl_command": "list files", "bash_code": "ls"}, ptd.ShellCorruptor()) is None
+
+
+def test_magicoder_shell_mapper():
+    bash_solution = (
+        "Here is a script that does it:\n\n"
+        "```bash\n#!/bin/sh\nset -eu\nfor f in \"$@\"; do\n    echo \"$f\"\ndone\n```\n\n"
+        "It prints each argument."
+    )
+    row = {"lang": "shell", "problem": "Echo all arguments.", "solution": bash_solution}
+    mapped = ptd.map_magicoder_shell_row(row, ptd.ShellCorruptor(seed=1))
+    assert mapped is not None
+    assert mapped["prompt_messages"] == [{"role": "user", "content": "Echo all arguments."}]
+    # Chosen is the bare extracted code (vezora/cybernative convention: no fences)
+    assert mapped["chosen"] == "#!/bin/sh\nset -eu\nfor f in \"$@\"; do\n    echo \"$f\"\ndone"
+    assert "```" not in mapped["chosen"]
+    assert mapped["rejected"] != mapped["chosen"]
+    assert mapped["pair_type"] == "synthetic"
+
+    # Non-shell language is filtered out
+    row_py = {"lang": "python", "problem": "Add numbers.", "solution": "```python\ndef add(a, b):\n    return a + b\n```"}
+    assert ptd.map_magicoder_shell_row(row_py, ptd.ShellCorruptor()) is None
+
+    # lang=shell but the solution is actually Python (common in this dataset): filtered out
+    row_mislabeled = {"lang": "shell", "problem": "Add numbers.", "solution": "```python\ndef add(a, b):\n    return a + b\n```"}
+    assert ptd.map_magicoder_shell_row(row_mislabeled, ptd.ShellCorruptor()) is None
+
+    # lang=shell with no fenced block at all: filtered out
+    row_nofence = {"lang": "shell", "problem": "Say hi.", "solution": "Just run echo hi in your terminal."}
+    assert ptd.map_magicoder_shell_row(row_nofence, ptd.ShellCorruptor()) is None
+
+    # extract_shell_code: sh tag works, untagged/other-tagged blocks do not
+    assert ptd.extract_shell_code("```sh\necho hi\n```") == "echo hi"
+    assert ptd.extract_shell_code("```\necho hi\n```") is None
+    assert ptd.extract_shell_code("") is None
+
+
+def test_shell_corruptor_ops():
+    c = ptd.ShellCorruptor(seed=7)
+
+    # Bashism: shebang swap
+    out = c.corrupt_bashism("#!/bin/sh\necho hi")
+    assert out == "#!/bin/bash\necho hi"
+    # Bashism: [ ] -> [[ ]]
+    out = c.corrupt_bashism("if [ -f \"$f\" ]; then echo yes; fi")
+    assert out == "if [[ -f \"$f\" ]]; then echo yes; fi"
+    # Bashism: function keyword
+    out = c.corrupt_bashism("greet() {\n    echo hi\n}")
+    assert out == "function greet() {\n    echo hi\n}"
+    # Bashism does not apply to plain commands
+    assert c.corrupt_bashism("echo hello") is None
+
+    # Unquoting
+    assert c.corrupt_unquoting("cat \"$FILE\"") == "cat $FILE"
+    assert c.corrupt_unquoting("run \"$@\"") == "run $@"
+    assert c.corrupt_unquoting("x=\"$(cmd)\"") == "x=$(cmd)"
+    assert c.corrupt_unquoting("echo plain") is None
+
+    # Error-handling strip
+    assert c.corrupt_strip_error_handling("set -eu\nfoo") == "foo"
+    assert c.corrupt_strip_error_handling("cmd || exit 1") == "cmd"
+    assert c.corrupt_strip_error_handling("a && b") == "a; b"
+    assert c.corrupt_strip_error_handling("echo hello") is None
+
+    # Wrong operator / flag
+    assert c.corrupt_wrong_operator("find . -type f") == "find . -type d"
+    assert c.corrupt_wrong_operator("[ $a -eq 3 ]") == "[ $a -ne 3 ]"
+    assert c.corrupt_wrong_operator("[ -f x ]") == "[ -d x ]"
+    assert c.corrupt_wrong_operator("echo hello") is None
+
+    # Pipeline truncation
+    assert c.corrupt_truncate_pipeline("cat f | grep x | wc -l") == "cat f | grep x"
+    assert c.corrupt_truncate_pipeline("echo hello") is None
+    # A quoted or escaped pipe is data (e.g. a grep pattern), not a pipeline stage
+    assert c.corrupt_truncate_pipeline("grep 'a|b' file.txt") is None
+    assert c.corrupt_truncate_pipeline("grep 'a|b' file.txt | wc -l") == "grep 'a|b' file.txt"
+    assert c.corrupt_truncate_pipeline("cmd || exit 1") is None
+
+    # Driver: every op's output differs from its input, and inapplicable text -> None
+    assert c.corrupt("echo hello") is None
+    for text in ("#!/bin/sh\nls", "echo \"$HOME\"", "set -e\nls", "ls -la | head -5"):
+        out = c.corrupt(text)
+        assert out is not None and out != text
+
+    # Determinism: two fresh corruptors walk the same rotation
+    texts = ["echo \"$A\"", "find . -type f", "a | b | c", "#!/bin/sh\nls", "x && y"]
+    c1, c2 = ptd.ShellCorruptor(seed=99), ptd.ShellCorruptor(seed=99)
+    assert [c1.corrupt(t) for t in texts] == [c2.corrupt(t) for t in texts]
+
+
+def test_merge_dpo_datasets_tool():
+    import merge_dpo_datasets as merge_tool
+
+    def make_rec(idx, source, pair_type="original"):
+        return {
+            "prompt": f"<|im_start|>user\nQuestion {idx}<|im_end|>\n<|im_start|>assistant\n",
+            "chosen": f"answer {idx} chosen",
+            "rejected": f"answer {idx} rejected",
+            "source": source,
+            "pair_type": pair_type,
+            "split": "train",
+            "prompt_messages": [{"role": "user", "content": f"Question {idx}"}],
+            "id": f"id-{idx}",
+        }
+
+    with tempfile.TemporaryDirectory() as td:
+        temp_dir = Path(td)
+        in1 = temp_dir / "general.jsonl"
+        in2 = temp_dir / "shell.jsonl"
+        out = temp_dir / "merged.jsonl"
+
+        rows1 = [make_rec(i, "general/src") for i in range(100)]
+        # in2 shares one record with in1 (duplicate id) plus 49 unique shell rows
+        rows2 = [make_rec(0, "general/src")] + [
+            make_rec(1000 + i, "shell/src", pair_type="synthetic") for i in range(49)
+        ]
+        with open(in1, "w", encoding="utf-8") as f:
+            for r in rows1:
+                f.write(json.dumps(r) + "\n")
+        with open(in2, "w", encoding="utf-8") as f:
+            for r in rows2:
+                f.write(json.dumps(r) + "\n")
+
+        count, out_p, stats_p = merge_tool.merge_datasets(out, [in1, in2], seed=42)
+        assert count == 149  # 100 + 50 - 1 duplicate
+        merged = [json.loads(l) for l in open(out_p, encoding="utf-8") if l.strip()]
+        assert len(merged) == 149
+        assert len({r["id"] for r in merged}) == 149
+
+        stats = json.loads(Path(stats_p).read_text(encoding="utf-8"))
+        assert stats["total_records"] == 149
+        assert stats["total_train"] + stats["total_eval"] == 149
+        # Stratified: the 100-row file contributes ~1% eval, the 50 kept shell rows ~1%
+        assert stats["per_source"]["general/src"]["kept"] == 100
+        assert stats["per_source"]["shell/src"]["kept"] == 49
+        assert stats["per_source"]["shell/src"]["dropped_by_reason"].get("duplicate") in (None, 0)
+        assert stats["total_eval"] >= 1
+
+        # Output round-trips through the pipeline verifier
+        assert ptd.test_pipeline_output(out_p, n_samples=1)
+
+        # Deterministic for the same seed
+        out2 = temp_dir / "merged2.jsonl"
+        merge_tool.merge_datasets(out2, [in1, in2], seed=42)
+        assert Path(out2).read_text(encoding="utf-8") == out_p.read_text(encoding="utf-8")
 
 
 # ==============================================================================
@@ -696,6 +874,10 @@ if __name__ == "__main__":
         test_agentforge_builder_schemas_and_corruptions,
         test_agentforge_type4_only_after_tool_error,
         test_agentforge_determinism,
+        test_nl2bash_mapper,
+        test_magicoder_shell_mapper,
+        test_shell_corruptor_ops,
+        test_merge_dpo_datasets_tool,
         test_qwen_chatml_rendering,
         test_plain_prompt_rendering,
         test_clean_text,
