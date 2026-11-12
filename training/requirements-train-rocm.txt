@@ -23,6 +23,14 @@
 --extra-index-url https://download.pytorch.org/whl/rocm7.2
 
 torch==2.14.1
+# torchvision must be pinned explicitly: it arrives as an unsloth dependency,
+# and unpinned, pip resolves the plain PyPI wheel, whose compiled operators
+# do not load against ROCm torch at import time (Unsloth's compatibility
+# probe fails with "RuntimeError: operator torchvision::nms does not
+# exist"). This pin resolves to the +rocm7.2 build from the extra index
+# above (verified: torchvision-0.29.1+rocm7.2-*.whl), the same build
+# Unsloth's own error message prescribes reinstalling by hand.
+torchvision==0.29.1
 transformers>=4.46.0
 datasets>=3.0.0
 accelerate>=1.0.0

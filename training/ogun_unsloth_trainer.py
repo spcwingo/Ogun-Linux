@@ -557,11 +557,24 @@ def load_model_and_tokenizer(
     """Lazy-load FastLanguageModel and apply 4-bit LoRA adapter."""
     try:
         from unsloth import FastLanguageModel
-    except ImportError:
+    except ImportError as e:
+        # Only a missing 'unsloth' module itself means the training
+        # dependencies were never installed. Any other ImportError here
+        # (e.g. a compiled operator inside a dependency such as torchvision
+        # failing to load against the installed torch build) happens WITH
+        # the packages installed, and reinstalling will not fix it — so
+        # surface the original error text instead of blaming a missing
+        # package.
+        if isinstance(e, ModuleNotFoundError) and (e.name or "").split(".")[0] == "unsloth":
+            raise ImportError(
+                "The 'unsloth' package is required for training. "
+                "Install training dependencies via training/requirements-train.txt."
+            ) from e
         raise ImportError(
-            "The 'unsloth' package is required for training. "
-            "Install training dependencies via training/requirements-train.txt."
-        )
+            f"Importing 'unsloth' failed: {e} "
+            "(The training packages are installed; this is an import error "
+            "inside unsloth or one of its dependencies, not a missing package.)"
+        ) from e
 
     hf_id = model_name or MODEL_SIZE_MAP.get(model_size.lower())
     if not hf_id:
