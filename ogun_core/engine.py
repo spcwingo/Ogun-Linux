@@ -6,6 +6,7 @@ native and text-based tool execution, and the dynamic plugin registry.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
@@ -376,21 +377,56 @@ class CoreEngine:
         plugin_manager: Optional[PluginManager] = None,
         security_guard: Optional[PathSecurityGuard] = None,
         base_dir: Optional[Path] = None,
+        work_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         self.base_dir = (base_dir or OGUN_ROOT).resolve()
+        self.work_dir = self._resolve_work_dir(work_dir)
         self.client = client or OllamaClient()
         self.plugin_manager = plugin_manager or PluginManager(base_dir=self.base_dir)
-        self.security_guard = security_guard or PathSecurityGuard(base_dir=self.base_dir)
+        if security_guard is not None:
+            self.security_guard = security_guard
+        elif self.work_dir != self.base_dir:
+            # Project mode: model writes anchor to the project tree, while
+            # Ogun's own install tree (protect_root) stays immutable.
+            self.security_guard = PathSecurityGuard(
+                base_dir=self.work_dir,
+                allowed_dirs=[self.work_dir],
+                protect_root=self.base_dir,
+            )
+        else:
+            self.security_guard = PathSecurityGuard(base_dir=self.base_dir)
         self.context_manager = ContextManager()
 
+        system_content = SYSTEM_PROMPT
+        if self.work_dir != self.base_dir:
+            system_content += (
+                f"\n\nYour project working directory is {self.work_dir}: "
+                "the file tools operate on that project directory."
+            )
         self.messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
+            {"role": "system", "content": system_content}
         ]
         self.last_turn_status: Dict[str, Any] = {
             "status": "success",
             "task": "",
             "error": "",
         }
+
+    def _resolve_work_dir(self, work_dir: Optional[Union[str, Path]]) -> Path:
+        """Resolve the project directory the file tools anchor to.
+
+        Precedence: the explicit work_dir argument, then $OGUN_WORK_DIR when
+        it names an existing directory, then base_dir (the Ogun root — the
+        historical behaviour when Ogun is launched from its own tree).
+        """
+        if work_dir:
+            return Path(work_dir).expanduser().resolve()
+        env_dir = os.environ.get("OGUN_WORK_DIR", "").strip()
+        if env_dir:
+            candidate = Path(env_dir).expanduser().resolve()
+            if candidate.is_dir():
+                return candidate
+        return self.base_dir
 
     def _client_timeout(self) -> float:
         """The active client's request timeout in seconds (300 when it doesn't say)."""
@@ -445,12 +481,12 @@ class CoreEngine:
                     filepath=args.get("filepath", ""),
                     start_line=args.get("start_line"),
                     end_line=args.get("end_line"),
-                    base_dir=self.base_dir,
+                    base_dir=self.work_dir,
                 )
             elif name == "list_directory":
                 return list_directory(
                     dirpath=args.get("dirpath", ""),
-                    base_dir=self.base_dir,
+                    base_dir=self.work_dir,
                     show_hidden=bool(args.get("show_hidden", False)),
                 )
             elif name == "write_file":
@@ -486,12 +522,12 @@ class CoreEngine:
             elif name == "check_syntax":
                 return check_syntax(
                     path_or_code=args.get("path_or_code", ""),
-                    base_dir=self.base_dir,
+                    base_dir=self.work_dir,
                 )
             elif name == "run_python_test":
                 res = run_python_test(
                     test_path=args.get("test_path", ""),
-                    base_dir=self.base_dir,
+                    base_dir=self.work_dir,
                 )
                 if turn_events is not None:
                     passed = "TEST PASS" in res

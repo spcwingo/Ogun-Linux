@@ -241,6 +241,10 @@ def main() -> None:
     parser.add_argument("--max-rounds", type=int, default=None, metavar="N",
                         help="Maximum tool execution rounds per turn (default: 50, or $OGUN_MAX_TOOL_ROUNDS). "
                              "Raise it for long multi-step tasks.")
+    parser.add_argument("--work-dir", type=str, default=None, metavar="DIR",
+                        help="Project directory the file tools operate on (default: $OGUN_WORK_DIR, set by "
+                             "run_ogun.sh to the launch directory, or the Ogun root). Launching Ogun inside "
+                             "another project anchors its reads and writes to that project.")
     parser.add_argument("--no-tools", action="store_true", help="Disable tool execution.")
     parser.add_argument("--unload", action="store_true",
                         help="Unload the model from Ollama (free its GPU memory) and exit.")
@@ -380,6 +384,7 @@ def main() -> None:
     engine = CoreEngine(
         client=client,
         plugin_manager=None if args.no_tools else plugin_manager,
+        work_dir=args.work_dir,
     )
 
     # 1. Build plugin mode (staged with self-correction)

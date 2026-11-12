@@ -30,6 +30,7 @@ from ogun_core.codetools import (
     run_python_test,
     write_file,
 )
+from ogun_core.config import SYSTEM_PROMPT
 from ogun_core.engine import BUILTIN_TOOL_SCHEMAS, ContextManager, CoreEngine
 from ogun_core.plugin_manager import PluginManager, normalize_plugin_name
 from ogun_core.security import PathSecurityGuard
@@ -622,6 +623,117 @@ def test_list_directory() -> None:
         assert "subdir/" in dispatched and "a.py" in dispatched
 
 
+def test_project_mode() -> None:
+    """Project mode: file tools anchor to the launch (work) directory.
+
+    Covers: default-mode guard behaviour unchanged; project-mode guard
+    semantics (relative writes and project .sh files allowed, the Ogun tree
+    still immutable, writes outside the project rejected); engine dispatch
+    anchoring reads/writes to work_dir; the project-mode system-prompt note;
+    and work_dir resolution precedence (arg > $OGUN_WORK_DIR > base_dir).
+    """
+    saved_env = os.environ.pop("OGUN_WORK_DIR", None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir).resolve()
+            ogun_root = tmp / "ogun"
+            project = tmp / "project"
+            for sub in ("ogun_core", "training", "plugins/custom_tools", "plugins/tests", "workspace"):
+                (ogun_root / sub).mkdir(parents=True, exist_ok=True)
+            (ogun_root / "main.py").write_text("# ogun entry\n", encoding="utf-8")
+            (ogun_root / "run_ogun.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            project.mkdir()
+            (project / "hello.py").write_text("print('hello from project')\n", encoding="utf-8")
+            (project / "build.sh").write_text("#!/bin/sh\necho build\n", encoding="utf-8")
+
+            # (a) Default mode: the guard behaves exactly as before.
+            guard = PathSecurityGuard(base_dir=ogun_root)
+            ws_target = ogun_root / "workspace" / "scratch.py"
+            assert guard.validate_write(ws_target) == ws_target
+            for blocked in (
+                ogun_root / "workspace" / "script.sh",   # .sh banned even inside workspace/
+                ogun_root / "loose.py",                  # outside the allowed dirs
+                ogun_root / "ogun_core" / "engine.py",   # core tree immutable
+            ):
+                try:
+                    guard.validate_write(blocked)
+                    assert False, f"default guard should reject {blocked}"
+                except PermissionError:
+                    pass
+
+            # (b) Project-mode guard, wired exactly as the engine wires it.
+            pguard = PathSecurityGuard(
+                base_dir=project,
+                allowed_dirs=[project],
+                protect_root=ogun_root,
+            )
+            assert pguard.validate_write("notes.txt") == project / "notes.txt"
+            assert pguard.validate_write(project / "build.sh") == project / "build.sh"
+            for blocked in (
+                ogun_root / "ogun_core" / "engine.py",   # Ogun core still immutable
+                ogun_root / "main.py",                   # Ogun entrypoint still immutable
+                ogun_root / "run_ogun.sh",               # Ogun's own .sh still banned
+                tmp / "outside.txt",                     # outside the project tree
+            ):
+                try:
+                    pguard.validate_write(blocked)
+                    assert False, f"project guard should reject {blocked}"
+                except PermissionError:
+                    pass
+
+            # Writes through codetools land inside the project, .sh included.
+            res = write_file("new_tool.py", "X = 1\n", security_guard=pguard)
+            assert "Successfully created" in res, res
+            assert (project / "new_tool.py").read_text(encoding="utf-8") == "X = 1\n"
+            res = write_file("deploy.sh", "#!/bin/sh\necho go\n", security_guard=pguard)
+            assert "Successfully created" in res, res
+            assert (project / "deploy.sh").exists()
+
+            # (c) Engine anchoring, and (d) resolution precedence.
+            engine = CoreEngine(client=object(), base_dir=ogun_root, work_dir=project)
+            assert engine.work_dir == project
+            listing = engine.dispatch_tool("list_directory", {"dirpath": "."})
+            assert "hello.py" in listing and "build.sh" in listing
+            content = engine.dispatch_tool("read_file", {"filepath": "hello.py"})
+            assert content.startswith("print('hello from project')"), content
+            created = engine.dispatch_tool("write_file", {"filepath": "made.py", "content": "Y = 2\n"})
+            assert "Successfully created" in created, created
+            assert (project / "made.py").exists()
+            scripted = engine.dispatch_tool("write_file", {"filepath": "run.sh", "content": "#!/bin/sh\ntrue\n"})
+            assert "Successfully created" in scripted, scripted
+            assert (project / "run.sh").exists()
+
+            # The same engine still cannot touch Ogun's own tree.
+            core_write = engine.dispatch_tool(
+                "write_file",
+                {"filepath": str(ogun_root / "ogun_core" / "evil.py"), "content": "Z = 3\n"},
+            )
+            assert "Successfully created" not in core_write
+            assert not (ogun_root / "ogun_core" / "evil.py").exists()
+
+            # Project mode is named in the system prompt; default mode is untouched.
+            assert str(project) in engine.messages[0]["content"]
+            default_engine = CoreEngine(client=object(), base_dir=ogun_root)
+            assert default_engine.work_dir == ogun_root
+            assert default_engine.messages[0]["content"] == SYSTEM_PROMPT
+
+            # $OGUN_WORK_DIR beats base_dir, loses to the explicit argument,
+            # and a nonexistent env directory falls back to base_dir.
+            os.environ["OGUN_WORK_DIR"] = str(project)
+            env_engine = CoreEngine(client=object(), base_dir=ogun_root)
+            assert env_engine.work_dir == project
+            arg_engine = CoreEngine(client=object(), base_dir=ogun_root, work_dir=ogun_root)
+            assert arg_engine.work_dir == ogun_root
+            os.environ["OGUN_WORK_DIR"] = str(tmp / "no_such_dir")
+            fallback_engine = CoreEngine(client=object(), base_dir=ogun_root)
+            assert fallback_engine.work_dir == ogun_root
+    finally:
+        if saved_env is None:
+            os.environ.pop("OGUN_WORK_DIR", None)
+        else:
+            os.environ["OGUN_WORK_DIR"] = saved_env
+
+
 def test_utf8_subprocess_output() -> None:
     """Test that subprocess runner correctly decodes non-ASCII UTF-8 output under Windows cp1252."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -936,6 +1048,7 @@ def run_all_tests() -> bool:
         ("12. unload command/CLI handling; no stale 30m", test_main_unload_command_cli_and_no_stale_keepalive),
         ("13. /vram toggle reaches the very next chat call", test_vram_toggle_reaches_every_chat_call),
         ("14. /vram commands (shared, max, cpu, free, status, help, Ollama down)", test_vram_commands),
+        ("15. Project Mode (work_dir anchoring, protect_root guard, precedence)", test_project_mode),
     ]
 
     print("=" * 60)

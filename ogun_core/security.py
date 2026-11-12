@@ -8,6 +8,12 @@ Any write tool invoked by the AI must resolve exclusively to:
 
 All other destinations (including ogun_core/, training/, main.py, .sh scripts,
 and plugins/registry.json) are strictly immutable.
+
+Project mode: when writes are anchored at a separate project directory
+(base_dir != protect_root), the writable area is that project tree while the
+install tree named by protect_root stays immutable under the same rules —
+including its .sh scripts, wherever in that tree they live. A project's own
+.sh files outside the protected tree are writable like any other file.
 """
 from __future__ import annotations
 
@@ -33,12 +39,18 @@ class PathSecurityGuard:
         self,
         base_dir: Optional[Path] = None,
         allowed_dirs: Optional[List[Path]] = None,
+        protect_root: Optional[Path] = None,
     ) -> None:
         self.base_dir = (base_dir or OGUN_ROOT).resolve()
-        self.core_dir = (self.base_dir / "ogun_core").resolve()
-        self.training_dir = (self.base_dir / "training").resolve()
-        self.registry_path = (self.base_dir / "plugins" / "registry.json").resolve()
-        self.main_file = (self.base_dir / "main.py").resolve()
+        # The install tree whose engine files stay immutable no matter where
+        # writes are anchored. Defaults to base_dir (the historical layout);
+        # project mode anchors writes at the project (base_dir) while passing
+        # the Ogun root here so Ogun's own files stay protected.
+        self.protect_root = (protect_root or self.base_dir).resolve()
+        self.core_dir = (self.protect_root / "ogun_core").resolve()
+        self.training_dir = (self.protect_root / "training").resolve()
+        self.registry_path = (self.protect_root / "plugins" / "registry.json").resolve()
+        self.main_file = (self.protect_root / "main.py").resolve()
 
         if allowed_dirs is None:
             self.allowed_dirs = [
@@ -89,6 +101,11 @@ class PathSecurityGuard:
         norm_train = os.path.normcase(str(self.training_dir.resolve()))
         return norm_target == norm_train or self.is_inside(target, self.training_dir)
 
+    def is_in_protect_root(self, target: Path) -> bool:
+        norm_target = os.path.normcase(str(target.resolve()))
+        norm_root = os.path.normcase(str(self.protect_root.resolve()))
+        return norm_target == norm_root or self.is_inside(target, self.protect_root)
+
     def is_allowed(self, filepath: Union[str, Path]) -> bool:
         try:
             self.validate_write(filepath)
@@ -102,7 +119,8 @@ class PathSecurityGuard:
         Raises PermissionError if:
           - The path targets ogun_core/ or any file within it
           - The path targets training/ or any file within it
-          - The path targets main.py, registry.json, or any .sh file
+          - The path targets main.py, registry.json, or any .sh file inside
+            the protected tree (protect_root)
           - The path is outside plugins/custom_tools/, plugins/tests/, or workspace/
 
         Returns the resolved Path if valid.
@@ -134,8 +152,10 @@ class PathSecurityGuard:
                 f"PermissionError: Modification of entrypoint '{self.main_file}' is forbidden."
             )
 
-        # Check .sh files
-        if target.suffix.lower() == ".sh":
+        # Check .sh files: Ogun's own shell scripts (anywhere inside the
+        # protected tree) stay immutable; a project's own .sh files outside
+        # that tree are ordinary project files and may be written.
+        if target.suffix.lower() == ".sh" and self.is_in_protect_root(target):
             raise PermissionError(
                 f"PermissionError: Modification of shell script '{target}' is forbidden."
             )

@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+# Capture the directory Ogun was launched from, before cd-ing to the repo
+# root: when Ogun is started inside another project, the file tools anchor
+# to that project ("project mode"). An OGUN_WORK_DIR already set in the
+# environment wins over the launch directory.
+if [ -z "${OGUN_WORK_DIR:-}" ]; then
+    OGUN_WORK_DIR="$PWD"
+fi
+export OGUN_WORK_DIR
+
 # Resolve and cd to the directory containing this script (repo root)
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
