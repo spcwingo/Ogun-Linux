@@ -2,7 +2,7 @@
 
 Tests:
 - All dataset mappers (Vezora, jondurbin, CyberNative, stack-exchange, UltraFeedback, dpo-mix)
-- Shell mappers (NL2Bash, Magicoder shell subset) and the ShellCorruptor (5 POSIX/BusyBox corruption ops, determinism)
+- Shell mappers (NL2Bash, Magicoder shell subset) and the ShellCorruptor (9 POSIX/BusyBox corruption ops, determinism), plus the chosen-side POSIX audit
 - AgentForge synthetic preference builder (4 corruption modes, seed determinism, tool error guard)
 - merge_dpo_datasets tool (dedupe, stratified split, stats, verifier round-trip)
 - Qwen ChatML & Plain prompt rendering
@@ -401,8 +401,40 @@ def test_shell_corruptor_ops():
     assert c.corrupt_truncate_pipeline("grep 'a|b' file.txt | wc -l") == "grep 'a|b' file.txt"
     assert c.corrupt_truncate_pipeline("cmd || exit 1") is None
 
+    # `local` injection inside a function body (v1's probe miss)
+    assert c.corrupt_local_injection("fetch() {\n    url=$1\n    echo \"$url\"\n}") == (
+        "fetch() {\n    local url=$1\n    echo \"$url\"\n}"
+    )
+    assert c.corrupt_local_injection("fetch() { url=$1; echo \"$url\"; }") == (
+        "fetch() { local url=$1; echo \"$url\"; }"
+    )
+    # Already-local, or no function at all, does not apply
+    assert c.corrupt_local_injection("fetch() {\n    local url=$1\n}") is None
+    assert c.corrupt_local_injection("url=$1\necho \"$url\"") is None
+
+    # `==` inside [ ] (POSIX wants a single =)
+    assert c.corrupt_double_equals('if [ "$x" = y ]; then echo yes; fi') == (
+        'if [ "$x" == y ]; then echo yes; fi'
+    )
+    assert c.corrupt_double_equals('if [ "$x" -eq 3 ]; then echo yes; fi') is None
+    assert c.corrupt_double_equals("x=1") is None
+
+    # echo -e
+    assert c.corrupt_echo_e('echo "hi"') == 'echo -e "hi"'
+    assert c.corrupt_echo_e('echo -e "hi"') is None
+    assert c.corrupt_echo_e("echo -n hi") is None
+    # A bare echo at end of line must not swallow the next line
+    assert c.corrupt_echo_e("echo\nls") is None
+
+    # source for .
+    assert c.corrupt_source_builtin(". ./helpers.sh\necho done") == "source ./helpers.sh\necho done"
+    assert c.corrupt_source_builtin('. "$lib"\necho done') == 'source "$lib"\necho done'
+    assert c.corrupt_source_builtin("./run.sh") is None
+    assert c.corrupt_source_builtin("source ./helpers.sh") is None
+
     # Driver: every op's output differs from its input, and inapplicable text -> None
-    assert c.corrupt("echo hello") is None
+    # (plain `echo hello` is no longer inert: op 8 now corrupts it to `echo -e`)
+    assert c.corrupt("ls") is None
     for text in ("#!/bin/sh\nls", "echo \"$HOME\"", "set -e\nls", "ls -la | head -5"):
         out = c.corrupt(text)
         assert out is not None and out != text
@@ -411,6 +443,45 @@ def test_shell_corruptor_ops():
     texts = ["echo \"$A\"", "find . -type f", "a | b | c", "#!/bin/sh\nls", "x && y"]
     c1, c2 = ptd.ShellCorruptor(seed=99), ptd.ShellCorruptor(seed=99)
     assert [c1.corrupt(t) for t in texts] == [c2.corrupt(t) for t in texts]
+
+
+def test_posix_chosen_audit():
+    # Clean POSIX passes; every hard bashism fails
+    assert not ptd.contains_hard_bashism('#!/bin/sh\nfetch() {\n    url=$1\n    [ "$url" = x ] && echo ok\n}')
+    assert not ptd.contains_hard_bashism("find . -type f -name '*.sh'")
+    assert not ptd.contains_hard_bashism(". ./helpers.sh")
+    for bad in (
+        "#!/bin/bash\necho hi",                       # bash shebang
+        'if [[ -f "$f" ]]; then echo yes; fi',        # [[ ]]
+        "files=(a b c)",                              # array assignment
+        'for f in "${files[@]}"; do echo "$f"; done',  # ${arr[@]}
+        "function greet() {\n    echo hi\n}",        # function keyword
+        "fetch() {\n    local url=$1\n}",             # local
+        "declare -a files",                           # declare
+        "let x=1+2",                                  # let
+        "cat <(ls)",                                  # process substitution
+        'if [[ $url =~ ^https?:// ]]; then echo ok; fi',  # =~
+        'if [ "$x" == y ]; then echo yes; fi',        # == in [ ]
+        "source ./helpers.sh",                        # source
+        'echo -e "hi"',                              # echo -e
+    ):
+        assert ptd.contains_hard_bashism(bad), f"audit missed: {bad!r}"
+
+    # Mappers drop bashism-chosen rows instead of teaching them as preferred
+    assert ptd.map_nl2bash_row(
+        {"nl_command": "greet", "bash_code": "[[ $x == y ]] && echo yes"},
+        ptd.ShellCorruptor(),
+    ) is None
+    assert ptd.map_nl2bash_row(
+        {"nl_command": "list files", "bash_code": "find . -type f"},
+        ptd.ShellCorruptor(seed=1),
+    ) is not None
+    row_local = {
+        "lang": "shell",
+        "problem": "Fetch a URL.",
+        "solution": "```sh\nfetch() {\n    local url=$1\n    echo \"$url\"\n}\n```",
+    }
+    assert ptd.map_magicoder_shell_row(row_local, ptd.ShellCorruptor()) is None
 
 
 def test_merge_dpo_datasets_tool():
@@ -877,6 +948,7 @@ if __name__ == "__main__":
         test_nl2bash_mapper,
         test_magicoder_shell_mapper,
         test_shell_corruptor_ops,
+        test_posix_chosen_audit,
         test_merge_dpo_datasets_tool,
         test_qwen_chatml_rendering,
         test_plain_prompt_rendering,

@@ -598,6 +598,37 @@ class AgentForgePreferenceBuilder:
 # 3b. SHELL SFT -> SYNTHETIC PREFERENCE PAIR BUILDER
 # ==============================================================================
 
+def contains_hard_bashism(text: str) -> bool:
+    """True when a shell snippet contains a hard bashism on the chosen side.
+
+    Used as a POSIX audit on SFT-derived chosen answers: NL2Bash's and
+    Magicoder's "good" answers are literally bash code, so without this
+    the preference signal teaches bashisms as the *preferred* behaviour
+    (v1's probe answer reaching for `local` is the visible symptom).
+    A pair whose chosen fails this audit is dropped, never repaired --
+    silently rewriting the chosen side would invent training data.
+    """
+    if not text:
+        return False
+    patterns = [
+        r"(?m)^#!.*\bbash\b",                    # bash shebang
+        r"\[\[",                                 # [[ ... ]] test
+        r"\]\]",
+        r"[A-Za-z_][A-Za-z0-9_]*\s*=\(",         # array assignment: files=(a b)
+        r"\$\{[^}]*\[@\]",                       # ${arr[@]}
+        r"\$\{[^}]*\[\*\]",                      # ${arr[*]}
+        r"(?m)^\s*function\s+[A-Za-z_][A-Za-z0-9_]*\s*\(",  # function name() {
+        r"(?m)(?:^|[;{]\s*)\s*local\s",           # local inside a function body
+        r"(?m)^\s*(let|declare|typeset)\b",       # let / declare / typeset
+        r"<\(|>\(",                              # process substitution
+        r"=~",                                   # [[ =~ ]] regex match
+        r"\[[^\]\n]*==",                         # == inside a [ ... ] test
+        r"(?m)^\s*source\s",                     # source instead of .
+        r"(?m)^\s*echo\s+-e\b",                  # echo -e
+    ]
+    return any(re.search(p, text) for p in patterns)
+
+
 class ShellCorruptor:
     """Deterministic corruptions that make a shell answer plausibly worse.
 
@@ -614,6 +645,12 @@ class ShellCorruptor:
     4. Wrong operator/flag swaps: `-eq` <-> `-ne`, `-lt` <-> `-gt`,
        `-ge` <-> `-le`, `find -type f` <-> `-type d`, `[ -f x ]` <-> `[ -d x ]`.
     5. Pipeline truncation: drop the final stage of a pipeline.
+    6. `local` injection: a plain assignment inside a function body gains
+       a `local` prefix (`x=$1` -> `local x=$1`). `local` is not POSIX
+       (BusyBox ash accepts it, which is exactly why models reach for it).
+    7. `==` inside `[ ... ]`: `[ "$x" = y ]` -> `[ "$x" == y ]`.
+    8. `echo -e`: a plain `echo` gains the non-POSIX `-e` flag.
+    9. `source` for `.`: a `. ./file` / `. "$file"` line becomes `source`.
 
     Each op returns the corrupted text, or None when it does not apply.
     `corrupt()` tries the ops in a rotating order driven by a per-instance
@@ -767,6 +804,57 @@ class ShellCorruptor:
                 return new
         return None
 
+    # -- op 6: `local` injection ------------------------------------------------
+    def corrupt_local_injection(self, text: str) -> Optional[str]:
+        lines = text.split("\n")
+        in_func = False
+        func_re = re.compile(r"^\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{")
+        assign_re = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*=)")
+        for idx, line in enumerate(lines):
+            if not in_func:
+                m = func_re.match(line)
+                if not m:
+                    continue
+                in_func = True
+                # One-line body: `f() { x=$1; }` -- corrupt the assignment
+                # on the definition line itself, after the opening brace.
+                rest = line[m.end():]
+                am = re.search(r"([A-Za-z_][A-Za-z0-9_]*=)", rest)
+                if am and "local" not in rest[:am.start()]:
+                    lines[idx] = line[:m.end()] + rest[:am.start()] + "local " + rest[am.start():]
+                    return "\n".join(lines)
+                continue
+            if re.match(r"^\s*\}\s*$", line):
+                in_func = False
+                continue
+            am = assign_re.match(line)
+            if am:
+                lines[idx] = f"{am.group(1)}local {am.group(2)}{line[am.end():]}"
+                return "\n".join(lines)
+        return None
+
+    # -- op 7: `==` inside `[ ... ]` --------------------------------------------
+    def corrupt_double_equals(self, text: str) -> Optional[str]:
+        new, n = re.subn(r"(\[[^\]\n]*?)\s=\s([^\]\n]*?\])", r"\1 == \2", text, count=1)
+        if n and new != text:
+            return new
+        return None
+
+    # -- op 8: `echo -e` ---------------------------------------------------------
+    def corrupt_echo_e(self, text: str) -> Optional[str]:
+        # [ \t] only: a bare `echo` at end of line must not swallow the newline
+        new, n = re.subn(r"\becho[ \t]+(?!-)", "echo -e ", text, count=1)
+        if n and new != text:
+            return new
+        return None
+
+    # -- op 9: `source` for `.` ---------------------------------------------------
+    def corrupt_source_builtin(self, text: str) -> Optional[str]:
+        new, n = re.subn(r"(?m)^([ \t]*)\.([ \t]+)", r"\1source\2", text, count=1)
+        if n and new != text:
+            return new
+        return None
+
     # -- driver -------------------------------------------------------------------
     def corrupt(self, text: str) -> Optional[str]:
         """Return a corrupted variant of `text`, or None if no op applies."""
@@ -778,6 +866,10 @@ class ShellCorruptor:
             self.corrupt_strip_error_handling,
             self.corrupt_wrong_operator,
             self.corrupt_truncate_pipeline,
+            self.corrupt_local_injection,
+            self.corrupt_double_equals,
+            self.corrupt_echo_e,
+            self.corrupt_source_builtin,
         ]
         start = self.corruption_counter % len(ops)
         self.corruption_counter += 1
@@ -1076,12 +1168,18 @@ def map_nl2bash_row(
 
     The rejected answer is synthesized by corrupting the reference command
     with POSIX/BusyBox-flavored corruptions (see ShellCorruptor). Rows whose
-    command no corruption applies to are skipped.
+    command no corruption applies to are skipped. Rows whose reference
+    command itself contains a hard bashism are also skipped: the chosen
+    side must be clean POSIX, or the pair teaches the bashism as preferred
+    (see contains_hard_bashism).
     """
     instruction = str(item.get("nl_command") or "").strip()
     command = str(item.get("bash_code") or "").strip()
 
     if not instruction or not command:
+        return None
+
+    if contains_hard_bashism(command):
         return None
 
     rejected = (corruptor or ShellCorruptor()).corrupt(command)
@@ -1127,6 +1225,8 @@ def map_magicoder_shell_row(
     Keeps only shell rows: lang must be shell/sh/bash AND the solution must
     contain an explicitly shell-tagged code block (see extract_shell_code).
     The rejected answer is a synthesized corruption of the extracted code.
+    Extracted code containing a hard bashism is dropped (chosen-side POSIX
+    audit, see contains_hard_bashism) instead of being taught as preferred.
     """
     lang = str(item.get("lang") or "").strip().lower()
     if lang not in ("shell", "sh", "bash"):
@@ -1139,6 +1239,9 @@ def map_magicoder_shell_row(
 
     code = extract_shell_code(solution)
     if not code:
+        return None
+
+    if contains_hard_bashism(code):
         return None
 
     rejected = (corruptor or ShellCorruptor()).corrupt(code)
