@@ -124,6 +124,67 @@ def test_save_history_writes_owner_only_file():
                 assert (hist.stat().st_mode & 0o777) == 0o600
 
 
+def _scripted(lines):
+    """An input_fn that replays `lines`, then raises EOFError like Ctrl+D."""
+    it = iter(lines)
+
+    def _input(prompt=""):
+        try:
+            return next(it)
+        except StopIteration:
+            raise EOFError
+
+    return _input
+
+
+def test_read_message_single_line_passthrough():
+    assert lineedit.read_message("p", input_fn=_scripted(["hello"])) == "hello"
+    # Not stripped: the caller owns that decision, as with plain input().
+    assert lineedit.read_message("p", input_fn=_scripted(["  spaced  "])) == "  spaced  "
+    # A line merely CONTAINING the fence later on is not a fence opener.
+    assert lineedit.read_message("p", input_fn=_scripted(['say """ hi'])) == 'say """ hi'
+
+
+def test_read_message_paste_collects_until_lone_dot():
+    msg = lineedit.read_message("p", input_fn=_scripted(
+        ["/paste", "#!/bin/sh", "  indented", "", "echo .", ".", "never read"]))
+    # Markers excluded, content verbatim (indent + blank line kept), and a
+    # line like `echo .` must NOT terminate the collection early.
+    assert msg == "#!/bin/sh\n  indented\n\necho ."
+
+
+def test_read_message_paste_eof_ends_collection():
+    msg = lineedit.read_message("p", input_fn=_scripted(["/paste", "a", "b"]))
+    assert msg == "a\nb"
+
+
+def test_read_message_fence_same_line():
+    assert lineedit.read_message("p", input_fn=_scripted(['"""echo hi"""'])) == "echo hi"
+
+
+def test_read_message_fence_multiline():
+    msg = lineedit.read_message("p", input_fn=_scripted(
+        ['"""', "#!/bin/sh", 'echo "$1"', '"""', "never read"]))
+    assert msg == '#!/bin/sh\necho "$1"'
+    # Content may share the fence lines themselves.
+    msg = lineedit.read_message("p", input_fn=_scripted(['"""first', "mid", 'last"""']))
+    assert msg == "first\nmid\nlast"
+
+
+def test_read_message_fence_unterminated_eof():
+    msg = lineedit.read_message("p", input_fn=_scripted(['"""', "x"]))
+    assert msg == "x"
+
+
+def test_read_message_first_line_eof_raises():
+    try:
+        lineedit.read_message("p", input_fn=_scripted([]))
+    except EOFError:
+        pass
+    else:
+        raise AssertionError("EOFError on the first line must propagate")
+
+
 def test_real_readline_is_present_on_this_platform():
     # The whole feature rests on the stdlib module existing; on platforms
     # where it does not, setup_history() must already have returned False
@@ -139,6 +200,13 @@ def main() -> int:
         test_setup_tolerates_unreadable_history,
         test_setup_without_readline_module,
         test_save_history_writes_owner_only_file,
+        test_read_message_single_line_passthrough,
+        test_read_message_paste_collects_until_lone_dot,
+        test_read_message_paste_eof_ends_collection,
+        test_read_message_fence_same_line,
+        test_read_message_fence_multiline,
+        test_read_message_fence_unterminated_eof,
+        test_read_message_first_line_eof_raises,
         test_real_readline_is_present_on_this_platform,
     ]
     for t in tests:

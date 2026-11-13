@@ -16,6 +16,12 @@ with owner-only permissions, since prompts can contain sensitive text.
 
 Everything degrades silently: a Python build without the readline module, or
 any history-file problem, simply keeps the old plain ``input()`` behaviour.
+
+This module also owns multi-line message entry (``read_message``): a plain
+``input()`` submits on every newline, so pasting a shell script into the
+prompt used to fire one model turn per line. ``read_message`` adds a
+``/paste`` collection mode and Ollama-style triple-quote fences so a block
+of text can be entered as ONE message.
 """
 from __future__ import annotations
 
@@ -82,3 +88,62 @@ def setup_history() -> bool:
         pass
     atexit.register(save_history)
     return True
+
+
+PASTE_COMMAND = "/paste"
+PASTE_TERMINATOR = "."
+FENCE = '"""'
+CONTINUATION_PROMPT = "... "
+
+
+def read_message(prompt: str = "\nOgun > ", input_fn=None) -> str:
+    """Read one user message from the prompt, allowing multi-line input.
+
+    Plain single-line behaviour by default: the first line is the message.
+    Two ways to enter several lines as ONE message (e.g. pasting a shell
+    script to ask the model about it):
+
+    - Type ``/paste`` on its own line, then the content lines, then a line
+      holding only ``.`` -- the collected lines become one message.
+    - Wrap the block in triple double-quotes, Ollama-style: a first line
+      starting with the fence collects until a line containing the closing
+      fence; a one-line fenced block works too.
+
+    Content lines are kept verbatim (indentation matters in scripts). EOF
+    (Ctrl+D) on the first line raises EOFError, exactly like ``input()``, so
+    the chat loop can exit; EOF in the middle of a collection simply ends it
+    and returns what was gathered. The result is not stripped -- the caller
+    decides, as it did with plain ``input()``.
+    """
+    get = input_fn if input_fn is not None else input
+    first = get(prompt)
+    stripped = first.strip()
+    if stripped == PASTE_COMMAND:
+        lines = []
+        while True:
+            try:
+                line = get(CONTINUATION_PROMPT)
+            except EOFError:
+                break
+            if line.strip() == PASTE_TERMINATOR:
+                break
+            lines.append(line)
+        return "\n".join(lines)
+    if stripped.startswith(FENCE):
+        rest = stripped[len(FENCE):]
+        if FENCE in rest:
+            return rest[:rest.index(FENCE)]
+        parts = [rest] if rest else []
+        while True:
+            try:
+                line = get(CONTINUATION_PROMPT)
+            except EOFError:
+                break
+            idx = line.find(FENCE)
+            if idx >= 0:
+                if line[:idx]:
+                    parts.append(line[:idx])
+                break
+            parts.append(line)
+        return "\n".join(parts)
+    return first
