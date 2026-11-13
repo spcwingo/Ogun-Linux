@@ -1,14 +1,14 @@
 # Ogun
 
-**A local coding assistant that runs entirely on your own PC.** Ogun chats with a local LLM through [Ollama](https://ollama.com), writes and edits code, and can **build its own plugins**: it writes a tool plus a unit test, runs the test in an isolated process, and only mounts the tool if the test passes. It also ships a complete pipeline for fine-tuning the model on your own machine.
+**A local coding assistant that runs entirely on your own PC.** Ogun chats with a local LLM — [Ollama](https://ollama.com) by default, or any OpenAI-compatible or Anthropic-shaped server you point it at — writes and edits code, and can **build its own plugins**: it writes a tool plus a unit test, runs the test in an isolated process, and only mounts the tool if the test passes. It also ships a complete pipeline for fine-tuning the model on your own machine.
 
-- **Private by design**: no cloud API, no telemetry. Everything runs against your local endpoint (you can again use cloud models if you so desire).
-- **Self-extending, but contained**: the AI can only write inside `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. It cannot modify Ogun itself.
-- **Plain Python and shell-script launchers**: nothing to compile, one tiny dependency (`ollama`).
+- **Private by design**: no telemetry, and the default setup talks only to your local Ollama. Other providers (a local server, a LAN endpoint, or a hosted API) are strictly opt-in: Ogun contacts only the server you choose.
+- **Self-extending, but contained**: the AI can only write inside `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. It cannot modify Ogun itself. Launched inside another project (project mode, below), the write area becomes that project instead, and Ogun's own tree stays protected.
+- **Plain Python and shell-script launchers**: nothing to compile, one tiny dependency (`ollama`) for the default provider; the other providers are standard-library only.
 - **GPU-aware**: switch between "max speed" and "leave VRAM for other apps" with a chat command.
 
 > **Platform:** Linux (the launchers are shell scripts). The Python code itself is portable, but only Linux has been tested.
-> **Status: public beta (v0.1.0-beta).** The chat engine, plugin builder, tool builder and data pipeline are tested and working. The fine-tuning step has **not** been run end to end yet (see [Training](#training-optional)***THIS IS NO LONGER THE CASE***). Please [report what breaks](#feedback-and-bug-reports).
+> **Status: public beta (v0.1.0-beta).** The chat engine, plugin builder, tool builder and data pipeline are tested and working, and the fine-tuning pipeline has been run end to end on AMD ROCm — the model it produced is in daily use with Ogun itself (see [Training](#training-optional)). Please [report what breaks](#feedback-and-bug-reports).
 
 ---
 
@@ -20,7 +20,7 @@
 | **Python 3.12** | runs Ogun; the launchers create their own virtual environment |
 | **[Ollama](https://ollama.com/download)** | serves the model (default provider; llama.cpp, LM Studio and other OpenAI-compatible servers also work — see [Using models from other local tools](#using-models-from-other-local-tools-unsloth-hugging-face-llamacpp-lm-studio-)) |
 | **~10 GB free disk** + RAM/VRAM for the model | `qwen2.5-coder:14b` is a ~9 GB download |
-| NVIDIA or AMD GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
+| NVIDIA, AMD or Intel GPU with ~10-12 GB VRAM *(recommended)* | without one Ogun still works but is slow (see [GPU memory](#gpu-memory-control-vram)) |
 
 ## Quick start
 
@@ -54,6 +54,8 @@ Type a request and press Enter. Type `exit` or `quit` to leave. `Ctrl+C` cancels
 
 The prompt has bash-style line editing (via GNU readline): Left/Right arrows move within the line you are typing, so you can fix a message before sending it; Up/Down step through your previous entries; `Ctrl+R` searches them; `Ctrl+A` / `Ctrl+E` jump to the start/end of the line. Entries persist across sessions in `~/.ogun_history` (set `$OGUN_HISTORY_FILE` to use a different file).
 
+**Multi-line messages** (pasting a script, say): type `/paste` on its own line, enter or paste the lines, and finish with a line holding only `.` — or wrap the block in lines of triple double-quotes (`"""`), the same convention as `ollama run`. Either way the block is sent as ONE message, with its lines verbatim.
+
 ### Command-line options
 
 | Option | What it does |
@@ -61,6 +63,7 @@ The prompt has bash-style line editing (via GNU readline): Left/Right arrows mov
 | `--once "prompt"` | run a single turn, print the answer, exit |
 | `--build-plugin "description"` | have the model write, test and mount a plugin (see below) |
 | `--model NAME` | use another model (default `qwen2.5-coder:14b`). With a non-Ollama provider this is that server's model id; a path to a `.gguf` file works with `--provider llama.cpp` (Ogun launches llama-server) or `--provider ollama` (auto-import) |
+| `--work-dir DIR` | work in another project directory: the file tools read and write there (including the project's `.sh` files) while Ogun's own tree stays protected. Launching Ogun from inside a project does this automatically (via `$OGUN_WORK_DIR`); see [Project mode](#project-mode) |
 | `--provider NAME` | where the model runs: `ollama` (default), `openai` (any OpenAI-compatible local server), `llama.cpp`, `lmstudio`, `anthropic` (Anthropic Messages API servers and gateways), or the name of a custom provider you defined |
 | `--host URL` | the inference server's base URL (default: the provider's usual local address) |
 | `--list-models` | list every local model Ogun can find, with the command that runs each, then exit |
@@ -84,11 +87,22 @@ Examples:
 ./run_ogun.sh --unload
 ```
 
+### Project mode
+
+Run Ogun from inside another project and the file tools work **there** instead of in Ogun's own tree:
+
+```bash
+cd ~/projects/my-app
+~/Ogun-Linux/run_ogun.sh        # or ../Ogun-Linux/run_ogun.sh — wherever it lives
+```
+
+The launcher records the launch directory (`$OGUN_WORK_DIR`; `--work-dir DIR` overrides it). Reads, listings, writes, syntax checks and test runs all anchor to that directory — including the project's own `.sh` files, which project mode may edit. Ogun's own tree flips to protected: its code, launchers, training folder and plugin registry cannot be written from a project session, and writes outside the project are refused. Plugin creation still writes into Ogun's `plugins/` tree, exactly as before. Launching from Ogun's own folder behaves exactly as it always has.
+
 ### What Ogun can do in a chat turn
 
-Ogun gives the model a small set of tools and runs the tool calls it makes: read files, **write new files**, **replace text in existing files** (exact match), check Python syntax, run a Python test in an isolated process, create plugins and list them. Tool calls work both when the model returns them natively and when a smaller model prints them as text (fenced JSON, bare JSON, `<tool_call>` blocks, arguments given as a JSON string, ...).
+Ogun gives the model a small set of tools and runs the tool calls it makes: read files, list directories, **write new files**, **replace text in existing files** (exact match), check Python syntax, run a Python test in an isolated process, create plugins and list them. Tool calls work both when the model returns them natively and when a smaller model prints them as text (fenced JSON, bare JSON, `<tool_call>` blocks, arguments given as a JSON string, ...).
 
-Writes are limited to the three safe folders (see [Safety](#safety-model)).
+Writes are limited to the safe folders (see [Safety](#safety-model)) — or, in project mode, to the project you launched from.
 
 ### Building command-line tools
 
@@ -283,9 +297,9 @@ Fixed generation settings (in `ogun_core/config.py`): temperature 0.1, top_p 0.9
 
 ## Training (optional)
 
-`training/` contains a local fine-tuning pipeline (DPO, 4-bit LoRA) for Qwen coder models. **You do not need it to use Ogun.**
+`training/` contains a local fine-tuning pipeline (DPO, 4-bit LoRA) for a local coder model — Qwen2.5-Coder-14B-Instruct by default (`--model-name` takes any Hugging Face instruct model id, `--model-size` picks the Qwen size). **You do not need it to use Ogun.**
 
-> **Honest status:** the data pipeline is tested and was run on the full datasets. The trainer's logic, argument handling and `--dry-run` are tested offline, but **no real training run has been completed yet**, and the Unsloth pipeline is unverified. Treat it as a starting point.
+> **Honest status:** the pipeline has been run end to end on real hardware (AMD RX 7900 XTX under ROCm): full DPO runs on the general mix, and on the general mix plus the POSIX shell block below, produced a working model that was quantized to Q4_K_M, registered in Ollama and used with Ogun itself. One caveat from that machine: both overnight runs hard-hung the PC late in the run (a frozen screen, no error in the log). The trainer keeps every checkpoint by default and validates and guards resumed runs, so the work was recoverable both times — but budget for a long run to need supervision, and expect your mileage to vary by GPU and driver.
 
 ### 1. Prepare the dataset
 
@@ -310,8 +324,8 @@ Downloads preference datasets, cleans and filters them, and writes `training/dat
 Notes:
 - `kashif/StackExchange_Code_DPO` is listed in the registry but **does not exist on Hugging Face**; the coding sources above replace it. A missing source is skipped with a warning.
 - The agentforge dataset has no "rejected" answers, so Ogun builds them deterministically by corrupting the real tool call (wrong tool, dropped required argument, claiming success without calling the tool, ignoring a real tool error). These are marked `pair_type: synthetic`.
-- The two shell sources are SFT datasets too, so their "rejected" answers are likewise synthesized — with corruptions tuned for POSIX/BusyBox shell discipline (the dialect of boot and init scripts): injected bashisms (`#!/bin/sh` → `#!/bin/bash`, `[ ]` → `[[ ]]`, the `function` keyword), dropped quoting (`"$VAR"` → `$VAR`), stripped error handling (`set -e`, `|| exit`, `&&` chains), wrong test/find operators, and truncated pipelines. Magicoder's `lang` field is not trusted on its own (many `lang: shell` rows are solved in Python); only rows whose solution is an explicitly `bash`/`sh`-tagged code block are kept. Merge a shell dataset with the general one using `training/merge_dpo_datasets.py`.
-- Prompts are rendered in Qwen's chat format (with the tool definitions for tool pairs), because DPO only makes sense on prompts that look like what the model sees at inference.
+- The two shell sources are SFT datasets too, so their "rejected" answers are likewise synthesized — with corruptions tuned for POSIX/BusyBox shell discipline (the dialect of boot and init scripts): injected bashisms (`#!/bin/sh` → `#!/bin/bash`, `[ ]` → `[[ ]]`, the `function` keyword, `local` in function bodies, `==` in `[ ]` tests, `echo -e`, `source` for `.`), dropped quoting (`"$VAR"` → `$VAR`), stripped error handling (`set -e`, `|| exit`, `&&` chains), wrong test/find operators, and truncated pipelines. The "chosen" answers are audited too: a shell answer that itself contains a hard bashism (`[[ ]]`, arrays, `local`, process substitution, `$'…'` quoting, …) is dropped rather than taught as preferred — except a `#!/bin/bash` shebang as the *only* flaw, which is relabeled `#!/bin/sh`, since the body already passed every content check. Magicoder's `lang` field is not trusted on its own (many `lang: shell` rows are solved in Python); only rows whose solution is an explicitly `bash`/`sh`-tagged code block are kept. Merge a shell dataset with the general one using `training/merge_dpo_datasets.py`.
+- Prompts are rendered in the model's chat format (ChatML for Qwen models; `--prompt-format plain` for raw prompts, with the tool definitions for tool pairs), because DPO only makes sense on prompts that look like what the model sees at inference.
 - **Check each dataset's license** before you train on it or redistribute anything derived from it. No data is included in this repository.
 
 Useful options: `--list-sources`, `--sources vezora,ultrafeedback`, `--max-per-source 2000` (a small test run), `--max-chars`, `--selftest`, `--verify`, `--offline`, `--refresh`.
@@ -332,6 +346,7 @@ training/run_fine_tune.sh                # the real run
 - Needs ~11 GB of **free** VRAM for the 14B model: close Ollama, Blender, Unreal and other GPU programs first. `--model-size 32b` is refused unless you pass `--force`.
 - Tool-calling pairs are long (their prompts include the tool definitions), so at the default `--max-seq-length 1024` most of them are filtered out and the trainer says so. Raise `--max-seq-length` / `--max-prompt-length` if your GPU allows.
 - The LoRA adapter is saved **before** the 16-bit GGUF export (~30 GB for the 14B model; the script checks free disk first). `--skip-gguf` trains and saves the adapter only.
+- **Checkpoints are kept, not rotated**: every checkpoint is saved by default (`--save-total-limit 0`), so a run that dies overnight leaves its work on disk. Resume with `--resume-from-checkpoint <dir>` — the checkpoint is validated before anything loads, and an engagement guard aborts the run if the first resumed steps show the adapter is not actually training (a resumed run that silently never trains is a real failure mode; see the changelog). `--output-dir` keeps separate runs — and their GGUF exports — side by side.
 
 ### 3. Use the result in Ogun
 
@@ -359,7 +374,7 @@ python3 tests/run_all.py
 | Suite | Covers |
 |---|---|
 | `tests/test_ogun_core.py` | tool-call parser, security guard, plugin lifecycle and registry safety, engine loop, code tools, UTF-8 subprocess output, `/vram` and GPU profiles |
-| `tests/test_training_data.py` | dataset mappers, synthetic pairs, cleaning/filters, resumable downloads, verification |
+| `tests/test_training_data.py` | dataset mappers, synthetic pairs, POSIX shell corruptions and chosen-side audit, cleaning/filters, resumable downloads, verification |
 | `tests/test_training_trainer.py` | prompt rendering, TRL-version compatibility, CLI, dataset reader, dry-run |
 | `tests/test_hardware.py` | hardware probe and auto-tuner |
 | `tests/test_dev_fixes.py` | standalone tool builder: checks, oracles, flow analysis, arbitration, fix feedback, scripted end-to-end builds |
@@ -368,13 +383,13 @@ python3 tests/run_all.py
 | `tests/test_option_checks.py` | checks that requested tool options really work |
 | `tests/test_unlimited_builds.py` | no-limit builds, Ctrl+C stop, failure research, restarts, feedback size |
 | `tests/test_providers.py` | non-Ollama providers (OpenAI-compatible, Anthropic Messages), custom named providers, `/provider` and `/model` switching, the `/model` menu, provider-aware error text |
-| `tests/test_lineedit.py` | prompt line editing and history (`~/.ogun_history`, `$OGUN_HISTORY_FILE`, fallback without readline) |
+| `tests/test_lineedit.py` | prompt line editing, history (`~/.ogun_history`, `$OGUN_HISTORY_FILE`, fallback without readline) and multi-line input (`/paste`, `"""` fences) |
 
 ## Safety model
 
-- **Writes are confined.** The security guard resolves every path (`..`, symlinks, case, network shares, look-alike folder names) and allows AI writes only under `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. Ogun's own code (`ogun_core/`), `main.py`, the launchers, `training/` and `registry.json` are off limits to the AI.
+- **Writes are confined.** The security guard resolves every path (`..`, symlinks, case, network shares, look-alike folder names) and allows AI writes only under `plugins/custom_tools/`, `plugins/tests/` and `workspace/`. Ogun's own code (`ogun_core/`), `main.py`, the launchers, `training/` and `registry.json` are off limits to the AI. In **project mode** the writable area is the project you launched from instead (its `.sh` files included), and Ogun's own tree becomes the protected one; writes outside the project are refused.
 - **Plugins run with your user's permissions.** A plugin is Python code that executes on your machine. Ogun validates and tests it before mounting, but a test cannot prove that code is harmless. Read plugins before you trust them, and don't paste prompts from sources you don't trust.
-- **Local only.** The only network use is talking to your Ollama server and, if you run the data pipeline, downloading datasets from Hugging Face. Build research on the web is **off** unless you set `OGUN_WEB_RESEARCH=1`; when on, a failing build sends short search queries made from its error messages (e.g. `python TypeError: unsupported operand`) to DuckDuckGo.
+- **You choose the server.** By default the only network use is talking to your local Ollama server and, if you run the data pipeline, downloading datasets from Hugging Face. Any other endpoint — a LAN box, a local gateway, a hosted API — is contacted only when you configure or select that provider. Build research on the web is **off** unless you set `OGUN_WEB_RESEARCH=1`; when on, a failing build sends short search queries made from its error messages (e.g. `python TypeError: unsupported operand`) to DuckDuckGo.
 
 ## Project layout
 
@@ -389,10 +404,11 @@ Ogun-Linux/
 │   ├── config.py            model options, prompts, VRAM profiles
 │   ├── hardware.py          hardware probe + auto-tuner (pure, stdlib only)
 │   ├── autotune.py          startup hook, CLI flags, saved profile
-│   ├── engine.py            Ollama client, chat loop, /vram commands
-│   ├── providers.py         other providers (OpenAI-compatible, llama.cpp), local model discovery, /model + /provider sessions
+│   ├── engine.py            chat engine: turn loop, tool dispatch, /vram commands
+│   ├── providers.py         providers (OpenAI-compatible, Anthropic Messages, managed llama.cpp), local model discovery, /model + /provider sessions
+│   ├── lineedit.py          prompt line editing, history, multi-line input
 │   ├── toolcalls.py         pure text tool-call parser
-│   ├── codetools.py         read / write / replace / syntax-check tools
+│   ├── codetools.py         read / write / replace / list / syntax-check tools
 │   ├── plugin_manager.py    validate, test, hot-load, registry, quarantine
 │   ├── security.py          path guard
 │   ├── base_tool.py         BaseTool and ToolResult
@@ -423,7 +439,7 @@ Every path Ogun uses is resolved relative to its own folder, so you can clone or
 - **Small local models make mistakes.** Builds can take many attempts, and some requests are beyond the model (stop those with `Ctrl+C`). Larger models do better but need more VRAM.
 - **Slow without a GPU.** CPU-only works, but replies and builds take much longer.
 - **The tool builder is best at single-file Python command-line tools** (text, CSV and JSON processing). Multi-file apps, GUIs and web servers are out of scope for now.
-- **Fine-tuning is unverified end to end.**
+- **Fine-tuning is a long, heavy GPU run.** It has completed end to end on AMD ROCm, but on the author's machine both overnight runs froze the PC near the end; keep-all checkpoints and the guarded resume exist for exactly that reason.
 
 ## Feedback and bug reports
 
