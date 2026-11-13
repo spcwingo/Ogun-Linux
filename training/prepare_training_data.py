@@ -598,6 +598,32 @@ class AgentForgePreferenceBuilder:
 # 3b. SHELL SFT -> SYNTHETIC PREFERENCE PAIR BUILDER
 # ==============================================================================
 
+_HARD_BASHISM_PATTERNS = [
+    ("bash_shebang", r"(?m)^#!.*\bbash\b"),                    # bash shebang
+    ("double_bracket", r"\[\["),                              # [[ ... ]] test
+    ("double_bracket", r"\]\]"),
+    ("array_assignment", r"[A-Za-z_][A-Za-z0-9_]*\s*=\("),    # files=(a b)
+    ("array_expansion", r"\$\{[^}]*\[@\]"),                    # ${arr[@]}
+    ("array_expansion", r"\$\{[^}]*\[\*\]"),                   # ${arr[*]}
+    ("function_keyword", r"(?m)^\s*function\s+[A-Za-z_][A-Za-z0-9_]*\s*\("),
+    ("local_keyword", r"(?m)(?:^|[;{]\s*)\s*local\s"),         # local in a body
+    ("let_declare", r"(?m)^\s*(let|declare|typeset)\b"),       # let/declare/typeset
+    ("process_substitution", r"<\(|>\("),                      # process substitution
+    ("regex_match", r"=~"),                                   # [[ =~ ]] regex match
+    ("test_double_equals", r"\[[^\]\n]*=="),                   # == inside a [ ... ] test
+    ("source_builtin", r"(?m)^\s*source\s"),                   # source instead of .
+    ("echo_e", r"(?m)^\s*echo\s+-e\b"),                        # echo -e
+    ("ansi_c_quoting", r"\$'"),                               # $'...' quoting
+]
+
+
+def hard_bashism_hits(text: str) -> set:
+    """Names of the hard bashisms present in a shell snippet (empty = clean)."""
+    if not text:
+        return set()
+    return {name for name, pat in _HARD_BASHISM_PATTERNS if re.search(pat, text)}
+
+
 def contains_hard_bashism(text: str) -> bool:
     """True when a shell snippet contains a hard bashism on the chosen side.
 
@@ -605,28 +631,33 @@ def contains_hard_bashism(text: str) -> bool:
     Magicoder's "good" answers are literally bash code, so without this
     the preference signal teaches bashisms as the *preferred* behaviour
     (v1's probe answer reaching for `local` is the visible symptom).
-    A pair whose chosen fails this audit is dropped, never repaired --
-    silently rewriting the chosen side would invent training data.
     """
-    if not text:
-        return False
-    patterns = [
-        r"(?m)^#!.*\bbash\b",                    # bash shebang
-        r"\[\[",                                 # [[ ... ]] test
-        r"\]\]",
-        r"[A-Za-z_][A-Za-z0-9_]*\s*=\(",         # array assignment: files=(a b)
-        r"\$\{[^}]*\[@\]",                       # ${arr[@]}
-        r"\$\{[^}]*\[\*\]",                      # ${arr[*]}
-        r"(?m)^\s*function\s+[A-Za-z_][A-Za-z0-9_]*\s*\(",  # function name() {
-        r"(?m)(?:^|[;{]\s*)\s*local\s",           # local inside a function body
-        r"(?m)^\s*(let|declare|typeset)\b",       # let / declare / typeset
-        r"<\(|>\(",                              # process substitution
-        r"=~",                                   # [[ =~ ]] regex match
-        r"\[[^\]\n]*==",                         # == inside a [ ... ] test
-        r"(?m)^\s*source\s",                     # source instead of .
-        r"(?m)^\s*echo\s+-e\b",                  # echo -e
-    ]
-    return any(re.search(p, text) for p in patterns)
+    return bool(hard_bashism_hits(text))
+
+
+_SHEBANG_LINE_RE = re.compile(r"(?m)^#!.*\bbash\b.*$")
+
+
+def audit_chosen_shell(code: str) -> Optional[str]:
+    """Return the text to use as a pair's chosen answer, or None to drop it.
+
+    Clean code passes unchanged. Code whose ONLY hard bashism is the bash
+    shebang is relabeled ``#!/bin/sh`` and re-audited: the body has already
+    passed every content check, and the shebang is a label, not logic --
+    in the Magicoder shell subset this sole-failure case is the majority
+    of otherwise-POSIX scripts, and dropping them would discard the only
+    full-script training stratum. Anything with a content bashism fails
+    the audit and the pair is dropped, never repaired -- rewriting chosen
+    *logic* would invent training data.
+    """
+    hits = hard_bashism_hits(code)
+    if not hits:
+        return code
+    if hits == {"bash_shebang"}:
+        fixed = _SHEBANG_LINE_RE.sub("#!/bin/sh", code, count=1)
+        if fixed != code and not hard_bashism_hits(fixed):
+            return fixed
+    return None
 
 
 class ShellCorruptor:
@@ -1168,10 +1199,10 @@ def map_nl2bash_row(
 
     The rejected answer is synthesized by corrupting the reference command
     with POSIX/BusyBox-flavored corruptions (see ShellCorruptor). Rows whose
-    command no corruption applies to are skipped. Rows whose reference
-    command itself contains a hard bashism are also skipped: the chosen
-    side must be clean POSIX, or the pair teaches the bashism as preferred
-    (see contains_hard_bashism).
+    command no corruption applies to are skipped. The reference command
+    must also pass the chosen-side POSIX audit (see audit_chosen_shell):
+    a content bashism in the chosen side would teach the bashism as
+    preferred; a bash shebang as the ONLY flaw is relabeled to /bin/sh.
     """
     instruction = str(item.get("nl_command") or "").strip()
     command = str(item.get("bash_code") or "").strip()
@@ -1179,7 +1210,8 @@ def map_nl2bash_row(
     if not instruction or not command:
         return None
 
-    if contains_hard_bashism(command):
+    command = audit_chosen_shell(command)
+    if command is None:
         return None
 
     rejected = (corruptor or ShellCorruptor()).corrupt(command)
@@ -1225,8 +1257,10 @@ def map_magicoder_shell_row(
     Keeps only shell rows: lang must be shell/sh/bash AND the solution must
     contain an explicitly shell-tagged code block (see extract_shell_code).
     The rejected answer is a synthesized corruption of the extracted code.
-    Extracted code containing a hard bashism is dropped (chosen-side POSIX
-    audit, see contains_hard_bashism) instead of being taught as preferred.
+    Extracted code must pass the chosen-side POSIX audit (see
+    audit_chosen_shell): content bashisms are dropped instead of being
+    taught as preferred; a bash shebang as the ONLY flaw is relabeled
+    to /bin/sh, which recovers most of this subset's clean scripts.
     """
     lang = str(item.get("lang") or "").strip().lower()
     if lang not in ("shell", "sh", "bash"):
@@ -1241,7 +1275,8 @@ def map_magicoder_shell_row(
     if not code:
         return None
 
-    if contains_hard_bashism(code):
+    code = audit_chosen_shell(code)
+    if code is None:
         return None
 
     rejected = (corruptor or ShellCorruptor()).corrupt(code)

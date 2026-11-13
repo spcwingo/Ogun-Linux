@@ -464,6 +464,7 @@ def test_posix_chosen_audit():
         'if [ "$x" == y ]; then echo yes; fi',        # == in [ ]
         "source ./helpers.sh",                        # source
         'echo -e "hi"',                              # echo -e
+        "echo $'a\\tb'",                              # ANSI-C quoting
     ):
         assert ptd.contains_hard_bashism(bad), f"audit missed: {bad!r}"
 
@@ -482,6 +483,38 @@ def test_posix_chosen_audit():
         "solution": "```sh\nfetch() {\n    local url=$1\n    echo \"$url\"\n}\n```",
     }
     assert ptd.map_magicoder_shell_row(row_local, ptd.ShellCorruptor()) is None
+
+
+def test_shebang_only_normalization():
+    # A bash shebang as the ONLY audit failure is relabeled, not dropped:
+    # the body already passed every content check.
+    assert ptd.hard_bashism_hits("#!/bin/bash\necho hi") == {"bash_shebang"}
+    fixed = ptd.audit_chosen_shell(
+        "#!/bin/bash\nif [ -z \"$1\" ]; then\n    echo \"Usage: $0 <id>\" >&2\n    exit 1\nfi")
+    assert fixed is not None and fixed.startswith("#!/bin/sh\n")
+    assert not ptd.contains_hard_bashism(fixed)
+    # Shebang PLUS any content bashism still drops the pair.
+    assert ptd.audit_chosen_shell("#!/bin/bash\n[[ -f x ]] && echo y") is None
+    assert ptd.audit_chosen_shell("#!/bin/bash\necho $'a\\tb'") is None
+    assert ptd.audit_chosen_shell("files=(a b c)") is None
+    # env-style bash shebang is relabeled the same way.
+    fixed_env = ptd.audit_chosen_shell("#!/usr/bin/env bash\necho ok")
+    assert fixed_env is not None and fixed_env.startswith("#!/bin/sh")
+
+    # End to end through the Magicoder mapper: the pair survives, its
+    # chosen side carries the sh shebang, and a corruption was synthesized.
+    row = {
+        "lang": "shell",
+        "problem": "Write a script that greets the user named in $1.",
+        "solution": ("```bash\n#!/bin/bash\nname=$1\n"
+                     "if [ -z \"$name\" ]; then\n    echo \"Usage: $0 <name>\" >&2\n    exit 1\nfi\n"
+                     "echo \"Hello, $name\"\n```"),
+    }
+    rec = ptd.map_magicoder_shell_row(row, ptd.ShellCorruptor(seed=3))
+    assert rec is not None
+    assert rec["chosen"].startswith("#!/bin/sh")
+    assert "#!/bin/bash" not in rec["chosen"]
+    assert rec["rejected"] != rec["chosen"]
 
 
 def test_merge_dpo_datasets_tool():
@@ -949,6 +982,7 @@ if __name__ == "__main__":
         test_magicoder_shell_mapper,
         test_shell_corruptor_ops,
         test_posix_chosen_audit,
+        test_shebang_only_normalization,
         test_merge_dpo_datasets_tool,
         test_qwen_chatml_rendering,
         test_plain_prompt_rendering,
