@@ -396,6 +396,9 @@ def is_tool_error(turn: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\n(.*?)\n</tool_call>", re.DOTALL)
+
+
 # ==============================================================================
 # 3. AGENTFORGE SFT -> SYNTHETIC PREFERENCE PAIR BUILDER
 # ==============================================================================
@@ -418,6 +421,7 @@ class AgentForgePreferenceBuilder:
             if name:
                 self._schema_lookup[name] = s
         self.corruption_counter = 0
+        self.wrapper_counter = 0
         self.seed = seed
 
     def corrupt_wrong_tool_name(
@@ -536,6 +540,77 @@ class AgentForgePreferenceBuilder:
         if narration:
             text += f" {narration}"
         return {"role": "assistant", "content": text.strip(), "tool_calls": []}
+
+    # -- Wrapper-format pairs (v3) -------------------------------------------
+    # The four corruptions above keep the canonical <tool_call> wrapper on
+    # both sides, so they teach WHAT to call, never HOW a call is wrapped.
+    # A base model whose own prior wraps calls in <tools> or <function-calls>
+    # tags (or a bare json fence) therefore gets no opposing gradient and
+    # keeps improvising the wrapper at inference time, where no harness can
+    # parse it. Wrapper pairs isolate exactly that dimension: the payload is
+    # byte-identical, only the costume changes.
+    WRAPPER_COSTUMES = ("tools", "function-calls", "json_fence")
+
+    @staticmethod
+    def rewrap_tool_calls(rendered: str, costume: str) -> str:
+        """Re-wrap every <tool_call> block in `rendered` in a wrong costume."""
+        def _sub(m: "re.Match[str]") -> str:
+            payload = m.group(1)
+            if costume == "tools":
+                return f"<tools>\n{payload}\n</tools>"
+            if costume == "function-calls":
+                return f"<function-calls>\n{payload}\n</function-calls>"
+            if costume == "json_fence":
+                return f"```json\n{payload}\n```"
+            return m.group(0)
+
+        return _TOOL_CALL_BLOCK_RE.sub(_sub, rendered)
+
+    def build_wrapper_pairs(
+        self,
+        item: Dict[str, Any],
+        schemas: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """One format-only pair per assistant tool turn in the conversation.
+
+        Chosen is the canonical <tool_call> rendering; rejected is the same
+        rendering with each call re-wrapped in a wrong costume (rotating).
+        """
+        messages = item.get("conversations") or item.get("messages")
+        if not isinstance(messages, list) or len(messages) < 2:
+            return []
+
+        tools = parse_tools(item.get("tools") or schemas or self.schemas)
+        pairs: List[Dict[str, Any]] = []
+
+        for i, turn in enumerate(messages):
+            if not isinstance(turn, dict) or turn.get("role") != "assistant":
+                continue
+
+            tool_calls = turn.get("tool_calls")
+            content = str(turn.get("content") or "")
+            if not (bool(tool_calls) or ("<tool_call>" in content)):
+                continue
+
+            chosen_str = format_assistant_turn(turn)
+            if "<tool_call>" not in chosen_str:
+                continue
+
+            costume = self.WRAPPER_COSTUMES[self.wrapper_counter % len(self.WRAPPER_COSTUMES)]
+            self.wrapper_counter += 1
+            rejected_str = self.rewrap_tool_calls(chosen_str, costume)
+            if rejected_str == chosen_str:
+                continue
+
+            pairs.append({
+                "prompt_messages": messages[:i],
+                "tools": tools,
+                "chosen": chosen_str,
+                "rejected": rejected_str,
+                "pair_type": "synthetic_wrapper",
+            })
+
+        return pairs
 
     def build_preference_pairs(
         self,

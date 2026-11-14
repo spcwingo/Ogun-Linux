@@ -3,7 +3,7 @@
 Tests:
 - All dataset mappers (Vezora, jondurbin, CyberNative, stack-exchange, UltraFeedback, dpo-mix)
 - Shell mappers (NL2Bash, Magicoder shell subset) and the ShellCorruptor (9 POSIX/BusyBox corruption ops, determinism), plus the chosen-side POSIX audit
-- AgentForge synthetic preference builder (4 corruption modes, seed determinism, tool error guard)
+- AgentForge synthetic preference builder (4 corruption modes, seed determinism, tool error guard) and wrapper-format pairs
 - merge_dpo_datasets tool (dedupe, stratified split, stats, verifier round-trip)
 - Qwen ChatML & Plain prompt rendering
 - clean_text and markdown fence repair (even, truncated opening, stray odd)
@@ -292,6 +292,73 @@ def test_agentforge_determinism():
     pairs1 = b1.build_preference_pairs(item)
     pairs2 = b2.build_preference_pairs(item)
     assert pairs1 == pairs2, "AgentForge pair generation must be completely deterministic for same seed"
+
+
+def test_rewrap_tool_calls_costumes():
+    payload = '{"name": "search_db", "arguments": {"query": "Alice"}}'
+    rendered = f"Looking it up.\n\n<tool_call>\n{payload}\n</tool_call>"
+    for costume, opener, closer in [
+        ("tools", "<tools>", "</tools>"),
+        ("function-calls", "<function-calls>", "</function-calls>"),
+        ("json_fence", "```json", "```"),
+    ]:
+        out = ptd.AgentForgePreferenceBuilder.rewrap_tool_calls(rendered, costume)
+        assert "<tool_call>" not in out, costume
+        assert payload in out, f"payload must survive byte-identical for {costume}"
+        assert opener in out and closer in out, costume
+        assert out.startswith("Looking it up."), "prose outside the block must be untouched"
+    # Multi-block turns: every block is re-wrapped
+    two = f"<tool_call>\n{payload}\n</tool_call>\n<tool_call>\n{payload}\n</tool_call>"
+    out2 = ptd.AgentForgePreferenceBuilder.rewrap_tool_calls(two, "tools")
+    assert out2.count("<tools>") == 2 and "<tool_call>" not in out2
+    # Unknown costume is a no-op
+    assert ptd.AgentForgePreferenceBuilder.rewrap_tool_calls(rendered, "nope") == rendered
+
+
+def test_agentforge_wrapper_pairs():
+    tools_json_str = json.dumps([
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look something up",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }
+    ])
+    item = {
+        "id": "af-wrap-1",
+        "tools": tools_json_str,
+        "conversations": [
+            {"role": "user", "content": "Look up Alice."},
+            {"role": "assistant", "content": "On it.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Alice"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["alice"]}'},
+            {"role": "assistant", "content": "Now Bob.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Bob"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["bob"]}'},
+            {"role": "assistant", "content": "And Carol.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Carol"}}]},
+        ],
+    }
+    builder = ptd.AgentForgePreferenceBuilder(seed=7)
+    pairs = builder.build_wrapper_pairs(item)
+    assert len(pairs) == 3, f"Expected 3 wrapper pairs, got {len(pairs)}"
+    costumes_seen = set()
+    for p in pairs:
+        assert p["pair_type"] == "synthetic_wrapper"
+        assert "<tool_call>" in p["chosen"]
+        assert "<tool_call>" not in p["rejected"], "rejected must not keep the canonical wrapper"
+        payload = p["chosen"].split("<tool_call>\n", 1)[1].split("\n</tool_call>", 1)[0]
+        assert payload in p["rejected"], "payload must be byte-identical; only the wrapper may differ"
+        if "<tools>" in p["rejected"]:
+            costumes_seen.add("tools")
+        elif "<function-calls>" in p["rejected"]:
+            costumes_seen.add("function-calls")
+        elif "```json" in p["rejected"]:
+            costumes_seen.add("json_fence")
+    assert costumes_seen == {"tools", "function-calls", "json_fence"}, f"rotation must cover all costumes, got {costumes_seen}"
 
 
 # ==============================================================================
@@ -978,6 +1045,8 @@ if __name__ == "__main__":
         test_agentforge_builder_schemas_and_corruptions,
         test_agentforge_type4_only_after_tool_error,
         test_agentforge_determinism,
+        test_rewrap_tool_calls_costumes,
+        test_agentforge_wrapper_pairs,
         test_nl2bash_mapper,
         test_magicoder_shell_mapper,
         test_shell_corruptor_ops,
