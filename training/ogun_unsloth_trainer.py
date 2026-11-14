@@ -736,8 +736,17 @@ def setup_dpo_trainer(
                         self._verdict()
 
             def on_train_end(self, args, state, control, **kwargs):  # noqa: ANN001, ANN202
-                # Short runs may end before 5 log entries arrive.
-                self._verdict()
+                # Judge only on a full sample. A run that ends with fewer
+                # logged margins than the sample window — a deliberate
+                # skip-to-export harvest resume, a smoke test — never gave
+                # the guard enough evidence to convict, and a genuinely
+                # dead resumed run logs hundreds of entries, so on_log
+                # fires long before train end in that case. (Observed
+                # 2026-11-13: a 1-step harvest resume was aborted here
+                # after train() returned, blocking the export it existed
+                # to perform.)
+                if len(self._margins) >= self._SAMPLES_NEEDED:
+                    self._verdict()
 
         dpo_trainer.add_callback(ResumeEngagementGuard())
         logger.info(
