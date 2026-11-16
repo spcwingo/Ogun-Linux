@@ -4,9 +4,10 @@
 Reads AgentForge multiturn toolcall conversations (the raw train.jsonl) and
 writes DPO records whose ONLY chosen/rejected difference is the tool-call
 wrapper: chosen uses the canonical <tool_call> tags, rejected re-wraps the
-identical payload in <tools>, <function-calls>, or a bare ```json fence --
-the three costumes a base model improvises at inference time, none of which
-any harness (Ollama included) can parse into a structured tool call.
+identical payload in <tools>, <function-calls>, a bare ```json fence, or
+<execute> -- the four costumes the ogun-coder models have been observed
+improvising at inference time, none of which any harness (Ollama included)
+can parse into a structured tool call.
 
 Records are shaped exactly like prepare_training_data.process_source output
 (same cleaning, fence repair, ChatML prompt rendering, length guards, dedup,
@@ -53,6 +54,8 @@ def costume_of(rejected: str) -> str:
         return "tools"
     if "```json" in rejected:
         return "json_fence"
+    if "<execute>" in rejected:
+        return "execute"
     return "unknown"
 
 

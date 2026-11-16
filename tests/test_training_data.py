@@ -301,6 +301,7 @@ def test_rewrap_tool_calls_costumes():
         ("tools", "<tools>", "</tools>"),
         ("function-calls", "<function-calls>", "</function-calls>"),
         ("json_fence", "```json", "```"),
+        ("execute", "<execute>", "</execute>"),
     ]:
         out = ptd.AgentForgePreferenceBuilder.rewrap_tool_calls(rendered, costume)
         assert "<tool_call>" not in out, costume
@@ -340,11 +341,13 @@ def test_agentforge_wrapper_pairs():
             {"role": "assistant", "content": "Now Bob.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Bob"}}]},
             {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["bob"]}'},
             {"role": "assistant", "content": "And Carol.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Carol"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["carol"]}'},
+            {"role": "assistant", "content": "Finally Dave.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Dave"}}]},
         ],
     }
     builder = ptd.AgentForgePreferenceBuilder(seed=7)
     pairs = builder.build_wrapper_pairs(item)
-    assert len(pairs) == 3, f"Expected 3 wrapper pairs, got {len(pairs)}"
+    assert len(pairs) == 4, f"Expected 4 wrapper pairs, got {len(pairs)}"
     costumes_seen = set()
     for p in pairs:
         assert p["pair_type"] == "synthetic_wrapper"
@@ -358,7 +361,9 @@ def test_agentforge_wrapper_pairs():
             costumes_seen.add("function-calls")
         elif "```json" in p["rejected"]:
             costumes_seen.add("json_fence")
-    assert costumes_seen == {"tools", "function-calls", "json_fence"}, f"rotation must cover all costumes, got {costumes_seen}"
+        elif "<execute>" in p["rejected"]:
+            costumes_seen.add("execute")
+    assert costumes_seen == {"tools", "function-calls", "json_fence", "execute"}, f"rotation must cover all costumes, got {costumes_seen}"
 
 
 # ==============================================================================

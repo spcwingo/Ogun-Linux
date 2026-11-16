@@ -549,7 +549,7 @@ class AgentForgePreferenceBuilder:
     # keeps improvising the wrapper at inference time, where no harness can
     # parse it. Wrapper pairs isolate exactly that dimension: the payload is
     # byte-identical, only the costume changes.
-    WRAPPER_COSTUMES = ("tools", "function-calls", "json_fence")
+    WRAPPER_COSTUMES = ("tools", "function-calls", "json_fence", "execute")
 
     @staticmethod
     def rewrap_tool_calls(rendered: str, costume: str) -> str:
@@ -562,6 +562,8 @@ class AgentForgePreferenceBuilder:
                 return f"<function-calls>\n{payload}\n</function-calls>"
             if costume == "json_fence":
                 return f"```json\n{payload}\n```"
+            if costume == "execute":
+                return f"<execute>\n{payload}\n</execute>"
             return m.group(0)
 
         return _TOOL_CALL_BLOCK_RE.sub(_sub, rendered)
