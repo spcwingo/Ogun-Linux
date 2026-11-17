@@ -1034,6 +1034,58 @@ def copy_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy(d)
 
 
+def test_sft_tool_and_final_examples():
+    import build_sft_dataset as sftb
+    item = {
+        "messages": [
+            {"role": "user", "content": "Look up Alice and Bob."},
+            {"role": "assistant", "content": "Checking Alice.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Alice"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["alice"]}'},
+            {"role": "assistant", "content": "Now Bob.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Bob"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["bob"]}'},
+            {"role": "assistant", "content": "Alice is in sales and Bob is in support."},
+        ],
+    }
+    tool_ex = sftb.collect_tool_examples([item], seed=7)
+    assert len(tool_ex) == 2, f"Expected 2 tool examples, got {len(tool_ex)}"
+    for ex in tool_ex:
+        assert ex["source"] == "agentforge_tool", f"Wrong source: {ex['source']}"
+        assert "<tool_call>" in ex["completion"], f"Tool completion must be canonical: {ex['completion'][:80]}"
+        assert "<|im_start|>" in ex["prompt"], "Prompt must be ChatML-rendered"
+    final_ex = sftb.collect_final_examples([item])
+    assert len(final_ex) == 1, f"Expected 1 final example, got {len(final_ex)}"
+    assert final_ex[0]["source"] == "agentforge_final", f"Wrong source: {final_ex[0]['source']}"
+    assert final_ex[0]["completion"] == "Alice is in sales and Bob is in support.", f"Final completion wrong: {final_ex[0]['completion']!r}"
+    assert "<tool_call>" not in final_ex[0]["completion"], "Final example must be prose, not a call"
+    print("  SFT tool/final extraction verified: canonical calls + prose closer")
+
+
+def test_sft_replay_and_dataset_caps():
+    import build_sft_dataset as sftb
+    replay_rows = [
+        {"prompt": "p1", "chosen": "c1", "rejected": "r1"},
+        {"prompt": "p2", "chosen": "", "rejected": "r2"},
+        {"prompt": "x" * 9000, "chosen": "c3", "rejected": "r3"},
+    ]
+    replay = sftb.collect_replay(replay_rows)
+    assert len(replay) == 1 and replay[0]["completion"] == "c1", f"Replay must keep only the valid row, got {replay}"
+    item = {
+        "messages": [
+            {"role": "user", "content": "Look up Alice."},
+            {"role": "assistant", "content": "Checking.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Alice"}}]},
+            {"role": "tool", "name": "lookup", "content": '{"status": 200, "data": ["alice"]}'},
+            {"role": "assistant", "content": "Done."},
+        ],
+    }
+    # Duplicated conversation: build_dataset must dedupe identical examples.
+    ds = sftb.build_dataset([item, item], replay_rows, max_tool=10, max_final=10, max_replay=10, seed=3)
+    sources = sorted(r["source"] for r in ds)
+    assert sources == ["agentforge_final", "agentforge_tool", "replay"], f"Dedup/caps wrong: {sources}"
+    capped = sftb.build_dataset([item], replay_rows, max_tool=0, max_final=0, max_replay=0, seed=3)
+    assert capped == [], f"Zero caps must emit nothing, got {len(capped)}"
+    print("  SFT replay validation + dataset caps/dedup verified")
+
+
 # ==============================================================================
 # MAIN TEST RUNNER
 # ==============================================================================
@@ -1052,6 +1104,8 @@ if __name__ == "__main__":
         test_agentforge_determinism,
         test_rewrap_tool_calls_costumes,
         test_agentforge_wrapper_pairs,
+        test_sft_tool_and_final_examples,
+        test_sft_replay_and_dataset_caps,
         test_nl2bash_mapper,
         test_magicoder_shell_mapper,
         test_shell_corruptor_ops,

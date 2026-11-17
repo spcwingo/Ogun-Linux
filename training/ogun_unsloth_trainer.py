@@ -451,8 +451,8 @@ def get_token_len(text: str, tokenizer: Optional[Any] = None) -> int:
 def filter_dpo_dataset(
     dataset: List[Dict[str, Any]],
     tokenizer: Optional[Any] = None,
-    max_prompt_length: int = 512,
-    max_seq_length: int = 1024,
+    max_prompt_length: int = 1536,
+    max_seq_length: int = 3072,
 ) -> List[Dict[str, Any]]:
     """Apply token-length budget, identical-completion drop, and prompt-hash deduplication."""
     valid_pairs: List[Dict[str, Any]] = []
@@ -550,7 +550,7 @@ def load_dataset_file(
 def load_model_and_tokenizer(
     model_size: str = "14b",
     model_name: Optional[str] = None,
-    max_seq_length: int = 1024,
+    max_seq_length: int = 3072,
     lora_r: int = 32,
     lora_alpha: Optional[int] = None,
 ) -> Tuple[Any, Any]:
@@ -1064,14 +1064,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-seq-length",
         type=int,
-        default=1024,
-        help="Maximum total sequence length (prompt + completion). Default: 1024.",
+        default=3072,
+        help="Maximum total sequence length (prompt + completion). Default: 3072. (The pre-2026-11 default of 1024 silently filtered out every tool-call pair: AgentForge prompts run 700-1250 tokens.)",
     )
     parser.add_argument(
         "--max-prompt-length",
         type=int,
-        default=512,
-        help="Maximum prompt length in tokens. Default: 512.",
+        default=1536,
+        help="Maximum prompt length in tokens. Default: 1536. (The pre-2026-11 default of 512 silently filtered out every tool-call pair.)",
     )
     parser.add_argument(
         "--beta",

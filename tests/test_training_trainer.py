@@ -737,6 +737,47 @@ def test_cli_resume_engagement_check_flag_default_and_value() -> None:
     assert args.no_resume_engagement_check is True
 
 
+def test_sft_parse_args_defaults():
+    import ogun_sft_trainer as sft
+    args = sft.parse_args(["--dataset-file", "d.jsonl", "--output-dir", "out"])
+    assert args.max_prompt_length == 1536, f"SFT prompt budget must default to 1536, got {args.max_prompt_length}"
+    assert args.max_seq_length == 3072, f"SFT seq budget must default to 3072, got {args.max_seq_length}"
+    assert args.epochs == 2.0 and args.learning_rate == 1e-4, f"SFT defaults drifted: {args.epochs}/{args.learning_rate}"
+    assert args.run_name == "ogun-coder-v5", f"Default run name: {args.run_name}"
+    print("  SFT parse defaults verified (1536/3072 budgets, 2 epochs, lr 1e-4)")
+
+
+def test_sft_filter_rows_budgets():
+    import ogun_sft_trainer as sft
+    tok = FakeTokenizer(tokens_per_word=1)
+    rows = [
+        {"prompt": "one two three", "completion": "four five"},
+        {"prompt": " ".join(["w"] * 2000), "completion": "ok"},
+        {"prompt": "short prompt", "completion": " ".join(["w"] * 3100)},
+    ]
+    kept, stats = sft.filter_sft_rows(rows, tokenizer=tok, max_prompt_length=1536, max_seq_length=3072)
+    assert len(kept) == 1 and kept[0]["completion"] == "four five", f"Only the in-budget row may survive: {kept}"
+    assert stats == {"dropped_prompt": 1, "dropped_seq": 1}, f"Drop stats wrong: {stats}"
+    print("  SFT token filter verified: prompt and total budgets enforced with stats")
+
+
+def test_sft_load_rows_validation():
+    import ogun_sft_trainer as sft
+    with tempfile.TemporaryDirectory() as td:
+        good = Path(td) / "good.jsonl"
+        good.write_text(json.dumps({"prompt": "p", "completion": "c"}) + "\n", encoding="utf-8")
+        rows = sft.load_sft_rows(good)
+        assert rows == [{"prompt": "p", "completion": "c"}], f"Load mismatch: {rows}"
+        bad = Path(td) / "bad.jsonl"
+        bad.write_text(json.dumps({"prompt": "p"}) + "\n", encoding="utf-8")
+        try:
+            sft.load_sft_rows(bad)
+            raise AssertionError("Missing completion must raise ValueError")
+        except ValueError:
+            pass
+    print("  SFT row loading validation verified")
+
+
 def run_all_tests() -> bool:
     tests = [
         test_vram_guard_below_11gb_refuses,
@@ -790,6 +831,9 @@ def run_all_tests() -> bool:
         test_validate_resume_checkpoint_without_trainer_state,
         test_validate_resume_checkpoint_valid,
         test_cli_resume_engagement_check_flag_default_and_value,
+        test_sft_parse_args_defaults,
+        test_sft_filter_rows_budgets,
+        test_sft_load_rows_validation,
     ]
 
     print("=" * 60)
