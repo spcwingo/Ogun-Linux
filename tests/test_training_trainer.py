@@ -743,7 +743,7 @@ def test_sft_parse_args_defaults():
     assert args.max_prompt_length == 1536, f"SFT prompt budget must default to 1536, got {args.max_prompt_length}"
     assert args.max_seq_length == 3072, f"SFT seq budget must default to 3072, got {args.max_seq_length}"
     assert args.epochs == 2.0 and args.learning_rate == 1e-4, f"SFT defaults drifted: {args.epochs}/{args.learning_rate}"
-    assert args.run_name == "ogun-coder-v5", f"Default run name: {args.run_name}"
+    assert args.run_name == "ogun-coder-v6", f"Default run name: {args.run_name}"
     print("  SFT parse defaults verified (1536/3072 budgets, 2 epochs, lr 1e-4)")
 
 
@@ -776,6 +776,67 @@ def test_sft_load_rows_validation():
         except ValueError:
             pass
     print("  SFT row loading validation verified")
+
+
+class _FakeParam:
+    def __init__(self, numel, requires_grad=False):
+        self._numel = numel
+        self.requires_grad = requires_grad
+
+    def numel(self):
+        return self._numel
+
+    def requires_grad_(self, value=True):
+        self.requires_grad = value
+        return self
+
+
+class _FakeModel:
+    def __init__(self, params):
+        self._params = params
+
+    def named_parameters(self):
+        return iter(self._params)
+
+
+def test_sft_enable_lm_head_training():
+    import ogun_sft_trainer as sft
+    lora = _FakeParam(100, requires_grad=True)
+    frozen = _FakeParam(500)
+    head = _FakeParam(778)
+    model = _FakeModel([
+        ("base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight", lora),
+        ("base_model.model.model.layers.0.mlp.gate_proj.weight", frozen),
+        ("base_model.model.lm_head.weight", head),
+    ])
+    info = sft.enable_lm_head_training(model)
+    assert head.requires_grad is True, "lm_head must become trainable"
+    assert frozen.requires_grad is False, "Non-head weights must stay frozen"
+    assert info["head_params"] == 778, f"Head param count wrong: {info}"
+    assert info["total_trainable"] == 100 + 778, f"Total trainable wrong: {info}"
+    assert info["tied_embeddings"] is False, f"Tied flag wrong: {info}"
+    print("  SFT lm_head enabling verified: head flips trainable, counts reported")
+
+
+def test_sft_enable_lm_head_training_missing_head_refuses():
+    import ogun_sft_trainer as sft
+    model = _FakeModel([("base_model.model.model.layers.0.mlp.gate_proj.weight", _FakeParam(10))])
+    try:
+        sft.enable_lm_head_training(model)
+        raise AssertionError("A model with no lm_head/embed must raise RuntimeError")
+    except RuntimeError:
+        pass
+    print("  SFT lm_head enabling verified: missing head refuses loudly")
+
+
+def test_sft_parse_args_v6_flags():
+    import ogun_sft_trainer as sft
+    args = sft.parse_args(["--dataset-file", "d.jsonl", "--output-dir", "out"])
+    assert args.train_lm_head is True, "v6 must train the lm_head by default"
+    assert args.optim == "adamw_torch", f"Optim default drifted: {args.optim}"
+    args = sft.parse_args(["--dataset-file", "d.jsonl", "--output-dir", "out", "--no-train-lm-head"])
+    assert args.train_lm_head is False, "--no-train-lm-head must disable head training"
+    print("  SFT v6 flags verified (train-lm-head default on, optim exposed)")
 
 
 def run_all_tests() -> bool:
@@ -834,6 +895,9 @@ def run_all_tests() -> bool:
         test_sft_parse_args_defaults,
         test_sft_filter_rows_budgets,
         test_sft_load_rows_validation,
+        test_sft_enable_lm_head_training,
+        test_sft_enable_lm_head_training_missing_head_refuses,
+        test_sft_parse_args_v6_flags,
     ]
 
     print("=" * 60)

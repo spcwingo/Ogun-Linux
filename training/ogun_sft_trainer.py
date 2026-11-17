@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 """Ogun SFT polish trainer: teach tool-call FORMAT by supervision.
 
-Built for ogun-coder-v5. Four DPO rounds (v1-v4) fixed shell/general
-preference behavior, but the model's tool calls still arrive wrapped in
-<tools> instead of the canonical <tool_call> tags every harness parses —
-and v4 proved the point decisively: 6,000 wrapper-contrast DPO pairs
-verifiably trained (19,984 examples, healthy margins) and the greedy
-wrapper did not move (Probe 4, 2026-11-16). A first-token format reflex
-is not a preference; it is taught by supervised fine-tuning on correct
-completions. That is this script's one job:
+Built for ogun-coder-v5; v6 adds lm_head training (see below). Four DPO
+rounds (v1-v4) fixed shell/general preference behavior, but the model's
+tool calls still arrive wrapped in <tools> instead of the canonical
+<tool_call> tags every harness parses — and v4 proved the point
+decisively: 6,000 wrapper-contrast DPO pairs verifiably trained (19,984
+examples, healthy margins) and the greedy wrapper did not move (Probe 4,
+2026-11-16). A first-token format reflex is not a preference; it is
+taught by supervised fine-tuning on correct completions.
+
+V5 post-mortem (2026-11-17, layer-by-layer measurement): the SFT data,
+tokenizer, and TRL processing were all verified clean — token 151657
+(<tool_call>) sat in the processed labels of the majority of tool rows,
+and the loss converged normally (~0.34) — yet the merged model still
+never emits the token. The bisect then showed the STOCK base model
+itself answers tool prompts with the <tools> wrapper: the dialect is
+inherited from Qwen2.5-Coder-14B-Instruct, not created by our training.
+And in every run v2-v5 the lm_head was FROZEN (LoRA touches only the
+transformer layers), leaving the <tool_call> output row at its small
+stock norm (0.358 vs ~1.59 for a normal token). V6's one change: train
+the lm_head alongside the LoRA (--train-lm-head, default on), so the
+tag's own output row learns directly. The merged lm_head weights were
+verified bit-identical to stock after v5, so nothing else about the
+export path is implicated. That is this script's one job:
 
   * Load a MERGED model directory as the base (v4's export), never a
     checkpoint resume — resume-to-train is structurally broken on this
@@ -107,6 +122,46 @@ def filter_sft_rows(
 
 
 # ==============================================================================
+# 1b. LM HEAD (v6)
+# ==============================================================================
+
+def enable_lm_head_training(model: Any) -> Dict[str, Any]:
+    """Mark the output head trainable so <tool_call>'s row can learn.
+
+    LoRA leaves lm_head frozen; v5 proved LoRA-only steering cannot make
+    token 151657 win at the call position. Find the lm_head weight (any
+    wrapper prefix — PEFT/Unsloth nest it several levels deep), flip
+    requires_grad, and report counts so the caller can log them loudly.
+    A tied-embedding model exposes the head as embed_tokens.weight; that
+    is accepted as the fallback. If neither exists, raise — a v6 run
+    that cannot train the head must fail at startup, not silently repeat
+    v5.
+    """
+    named = list(model.named_parameters())
+    head = [(n, p) for n, p in named if n.endswith("lm_head.weight")]
+    tied = False
+    if not head:
+        head = [(n, p) for n, p in named if n.endswith("embed_tokens.weight")]
+        tied = bool(head)
+    if not head:
+        raise RuntimeError(
+            "No lm_head.weight (or tied embed_tokens.weight) found among "
+            "model parameters — cannot enable head training; refusing to "
+            "start a polish run that would repeat the v5 result."
+        )
+    for _, p in head:
+        p.requires_grad_(True)
+    head_params = sum(p.numel() for _, p in head)
+    total_trainable = sum(p.numel() for _, p in named if getattr(p, "requires_grad", False))
+    return {
+        "head_param_names": [n for n, _ in head],
+        "head_params": head_params,
+        "total_trainable": total_trainable,
+        "tied_embeddings": tied,
+    }
+
+
+# ==============================================================================
 # 2. ARGUMENTS
 # ==============================================================================
 
@@ -120,7 +175,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Base to polish: a local merged-model directory (v4 export) or HF id. "
                              "Defaults to --model-size's HF id.")
     parser.add_argument("--model-size", default="14b", help="Model size key when --model-name is omitted (14b/32b).")
-    parser.add_argument("--run-name", default="ogun-coder-v5", help="Run subdirectory name under --output-dir.")
+    parser.add_argument("--run-name", default="ogun-coder-v6", help="Run subdirectory name under --output-dir.")
     parser.add_argument("--max-prompt-length", type=int, default=1536,
                         help="Maximum prompt length in tokens. Default: 1536 (the DPO trainer's old 512 dropped every tool pair).")
     parser.add_argument("--max-seq-length", type=int, default=3072,
@@ -132,6 +187,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Per-device train batch size. Default: 1.")
     parser.add_argument("--grad-accum", type=int, default=16, help="Gradient accumulation steps. Default: 16.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--train-lm-head", action=argparse.BooleanOptionalAction, default=True,
+                        help="Train the lm_head alongside the LoRA (the v6 change: the <tool_call> "
+                             "output row must learn directly). Use --no-train-lm-head to reproduce v5.")
+    parser.add_argument("--optim", default="adamw_torch",
+                        help="Optimizer (passed to SFTConfig). Default: adamw_torch. "
+                             "adamw_bnb_8bit is the fallback if the trainable head OOMs.")
     parser.add_argument("--skip-gguf", action="store_true", help="Skip the GGUF export step.")
     parser.add_argument("--force", action="store_true", help="Bypass the export disk-space preflight.")
     return parser.parse_args(argv)
@@ -157,6 +218,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
     )
+
+    # V6: train the output head too. Loud on purpose — the startup log is
+    # the receipt that this run is not a v5 repeat. Expected totals for
+    # the 14B: ~137.6M LoRA-only vs ~915M with the head (778M) trainable.
+    if args.train_lm_head:
+        head_info = enable_lm_head_training(model)
+        logger.info(
+            "lm_head training ENABLED: %s (%s head params%s); %s total trainable parameters.",
+            head_info["head_param_names"],
+            f"{head_info['head_params']:,}",
+            ", tied embeddings" if head_info["tied_embeddings"] else "",
+            f"{head_info['total_trainable']:,}",
+        )
+    else:
+        logger.info("lm_head training DISABLED (--no-train-lm-head): this reproduces the v5 setup.")
 
     # Token-budget filter, with the counts printed loudly (the v4 lesson).
     kept, stats = filter_sft_rows(
@@ -195,6 +271,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
+        optim=args.optim,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         logging_steps=5,
