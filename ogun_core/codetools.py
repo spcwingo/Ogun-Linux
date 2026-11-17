@@ -34,6 +34,129 @@ def _strip_prefixes(text: str) -> str:
     return "\n".join(stripped)
 
 
+# --- Heredoc guard -----------------------------------------------------------
+# Shell scripts that generate other scripts (build scripts, initramfs
+# assemblers) embed those scripts as heredocs. An edit anchored on a line
+# inside a heredoc body changes the GENERATED script, not the file's own
+# code — and a model asked to edit "near the top" of such a file will happily
+# anchor on the first `#!/bin/sh` it finds, which is usually a payload's.
+# replace_in_file therefore refuses an edit whose match lies inside a
+# heredoc body unless old_text itself includes the heredoc opening line
+# (proof the caller knows it is editing a generated script).
+
+_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<(?!<)(-)?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+_SHELL_SUFFIXES = {".sh", ".bash", ".ash", ".ksh", ".zsh"}
+_SHELL_INTERPRETERS = {"sh", "bash", "ash", "dash", "ksh", "zsh", "mksh"}
+
+
+def _looks_like_shell_script(target: Path, content: str) -> bool:
+    """True for .sh-family files and extensionless files with a shell shebang."""
+    if target.suffix.lower() in _SHELL_SUFFIXES:
+        return True
+    first = content.split("\n", 1)[0] if content else ""
+    if not first.startswith("#!"):
+        return False
+    tokens = first[2:].split()
+    if not tokens:
+        return False
+    interp = Path(tokens[0]).name
+    if interp == "env":
+        interp = Path(tokens[1]).name if len(tokens) > 1 else ""
+    return interp in _SHELL_INTERPRETERS
+
+
+def _heredoc_body_spans(content: str) -> List[tuple[int, int, str, int]]:
+    """Locate heredoc bodies in shell source.
+
+    Returns (body_start, body_end, delimiter, opener_line_no) tuples, where
+    the offsets bound the lines between the opener line and the terminator
+    line (both excluded) and opener_line_no is 1-based. Heredocs whose
+    terminator never appears are ignored — an unconfirmed heredoc must not
+    block edits. Stacked heredocs (several openers on one line) queue in
+    order, as the shell consumes them.
+    """
+    spans: List[tuple[int, int, str, int]] = []
+    lines = content.splitlines(keepends=True)
+    offsets: List[int] = []
+    pos = 0
+    for raw in lines:
+        offsets.append(pos)
+        pos += len(raw)
+
+    pending: List[tuple[str, bool, int]] = []  # (delimiter, strip_tabs, opener line no)
+    body_start = 0
+    for idx, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        if pending:
+            delim, strip_tabs, opener_line = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delim:
+                spans.append((body_start, offsets[idx], delim, opener_line))
+                pending.pop(0)
+                if pending:
+                    body_start = offsets[idx] + len(raw)
+            continue
+        found = _HEREDOC_OPEN_RE.findall(line)
+        if found:
+            for dash, _quote, delim in found:
+                pending.append((delim, bool(dash), idx + 1))
+            body_start = offsets[idx] + len(raw)
+    return spans
+
+
+def _heredoc_guard_error(
+    filepath: str,
+    target: Path,
+    content: str,
+    clean_old: str,
+    count: int,
+) -> Optional[str]:
+    """Error string when a pending edit lands inside a heredoc body, else None.
+
+    Only the matches that would actually be replaced (the first `count`)
+    are checked. An edit is allowed when its own old_text includes the
+    heredoc opening line's `<<DELIM` marker for every body it touches.
+    Disable with OGUN_HEREDOC_GUARD=0.
+    """
+    if os.environ.get("OGUN_HEREDOC_GUARD", "1") == "0":
+        return None
+    if not _looks_like_shell_script(target, content):
+        return None
+    spans = _heredoc_body_spans(content)
+    if not spans:
+        return None
+
+    starts: List[int] = []
+    pos = content.find(clean_old)
+    while pos != -1 and len(starts) < count:
+        starts.append(pos)
+        pos = content.find(clean_old, pos + 1)
+
+    for start in starts:
+        end = start + len(clean_old)
+        for body_start, body_end, delim, opener_line in spans:
+            if start >= body_end or end <= body_start:
+                continue
+            opener_marker = re.compile(
+                r"<<-?[ \t]*['\"]?" + re.escape(delim) + r"['\"]?"
+            )
+            if opener_marker.search(clean_old):
+                continue
+            first_line = content.count("\n", 0, start) + 1
+            return (
+                f"Error: edit blocked by the heredoc guard: the text to replace in "
+                f"'{filepath}' (starting at line {first_line}) lies inside a heredoc "
+                f"block (delimiter '{delim}', opened at line {opener_line}) that "
+                "generates another script. Changing it would alter the generated "
+                "script, not this file's own code. If editing the generated script "
+                "is truly intended, include the heredoc opening line (the line "
+                f"containing '<<{delim}') in old_text to confirm. Otherwise, target "
+                "the file's top-level code. Set OGUN_HEREDOC_GUARD=0 to disable "
+                "this guard."
+            )
+    return None
+
+
 def read_file(
     filepath: str,
     start_line: Optional[int] = None,
@@ -206,6 +329,10 @@ def replace_in_file(
             f"Error: old_text found {occurrences} times in '{filepath}' (expected {count}). "
             "Please include more surrounding context to disambiguate."
         )
+
+    heredoc_error = _heredoc_guard_error(filepath, target, content, clean_old, count)
+    if heredoc_error:
+        return heredoc_error
 
     updated = content.replace(clean_old, clean_new, count)
     try:

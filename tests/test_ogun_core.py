@@ -594,6 +594,131 @@ def test_codetools_operations() -> None:
         assert "SyntaxError" in syn_bad
 
 
+def test_replace_in_file_heredoc_guard() -> None:
+    """Heredoc guard: edits inside a shell heredoc body are refused unless
+    old_text includes the heredoc opening line; top-level edits, non-shell
+    files, unterminated heredocs and the env override are unaffected."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        # Wired as the engine wires project mode: the temp project is the
+        # writable area (its .sh files included), a separate install tree
+        # stays protected.
+        project = root / "project"
+        install = root / "install"
+        project.mkdir()
+        install.mkdir()
+        guard = PathSecurityGuard(
+            base_dir=project, allowed_dirs=[project], protect_root=install
+        )
+
+        script = (
+            "#!/bin/sh\n"
+            "echo start\n"
+            "cat > /tmp/gen.sh << 'EOF'\n"
+            "#!/bin/sh\n"
+            "echo generated\n"
+            "EOF\n"
+            "echo end\n"
+        )
+        res = write_file("workspace/gen.sh", script, security_guard=guard)
+        assert "Successfully created" in res
+
+        # 1. Top-level edit is allowed.
+        res_top = replace_in_file(
+            "workspace/gen.sh", "echo start", "echo begin", count=1, security_guard=guard
+        )
+        assert "Successfully updated" in res_top, res_top
+
+        # 2. Edit inside the heredoc body is refused; the file is unchanged.
+        res_in = replace_in_file(
+            "workspace/gen.sh",
+            "#!/bin/sh\necho generated",
+            "#!/bin/sh\necho hacked",
+            count=1,
+            security_guard=guard,
+        )
+        assert "heredoc guard" in res_in, res_in
+        content = read_file("workspace/gen.sh", base_dir=project)
+        assert "echo generated" in content and "hacked" not in content
+
+        # 3. The same interior edit is allowed when old_text includes the
+        # heredoc opening line (the caller proves it means the payload).
+        res_aware = replace_in_file(
+            "workspace/gen.sh",
+            "cat > /tmp/gen.sh << 'EOF'\n#!/bin/sh\necho generated",
+            "cat > /tmp/gen.sh << 'EOF'\n#!/bin/sh\necho generated v2",
+            count=1,
+            security_guard=guard,
+        )
+        assert "Successfully updated" in res_aware, res_aware
+        content = read_file("workspace/gen.sh", base_dir=project)
+        assert "echo generated v2" in content
+
+        # 4. Tab-indented <<- heredocs are guarded too.
+        tab_script = (
+            "#!/bin/sh\n"
+            "if true; then\n"
+            "\tcat <<-EOF\n"
+            "\tbody line\n"
+            "\tEOF\n"
+            "fi\n"
+        )
+        assert "Successfully created" in write_file(
+            "workspace/tab.sh", tab_script, security_guard=guard
+        )
+        res_tab = replace_in_file(
+            "workspace/tab.sh", "body line", "changed line", count=1, security_guard=guard
+        )
+        assert "heredoc guard" in res_tab, res_tab
+
+        # 5. An unterminated heredoc is unconfirmed: edits stay allowed.
+        open_script = "#!/bin/sh\ncat << 'EOF'\nnever closed\n"
+        assert "Successfully created" in write_file(
+            "workspace/open.sh", open_script, security_guard=guard
+        )
+        res_open = replace_in_file(
+            "workspace/open.sh", "never closed", "closed now", count=1, security_guard=guard
+        )
+        assert "Successfully updated" in res_open, res_open
+
+        # 6. Non-shell files are out of scope even with heredoc-shaped text.
+        pysrc = "TEXT = '''\ncat << 'EOF'\ninner line\nEOF\n'''\n"
+        assert "Successfully created" in write_file(
+            "workspace/notshell.py", pysrc, security_guard=guard
+        )
+        res_py = replace_in_file(
+            "workspace/notshell.py", "inner line", "outer line", count=1, security_guard=guard
+        )
+        assert "Successfully updated" in res_py, res_py
+
+        # 7. Extensionless file with a shell shebang is in scope.
+        assert "Successfully created" in write_file(
+            "workspace/runner", script, security_guard=guard
+        )
+        res_runner = replace_in_file(
+            "workspace/runner",
+            "#!/bin/sh\necho generated",
+            "#!/bin/sh\necho hacked",
+            count=1,
+            security_guard=guard,
+        )
+        assert "heredoc guard" in res_runner, res_runner
+
+        # 8. OGUN_HEREDOC_GUARD=0 disables the guard.
+        os.environ["OGUN_HEREDOC_GUARD"] = "0"
+        try:
+            res_off = replace_in_file(
+                "workspace/gen.sh",
+                "echo generated v2",
+                "echo generated v3",
+                count=1,
+                security_guard=guard,
+            )
+            assert "Successfully updated" in res_off, res_off
+        finally:
+            del os.environ["OGUN_HEREDOC_GUARD"]
+
+
 def test_list_directory() -> None:
     """Test list_directory: entries, hidden filtering, errors, schema, dispatch."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1041,6 +1166,7 @@ def run_all_tests() -> bool:
         ("6c. Tool History Recording (call ids, error note, prune pairing)", test_engine_tool_history_recording),
         ("7. Codetools Operations (Write, Replace, Read, Syntax)", test_codetools_operations),
         ("7b. list_directory (entries, hidden, errors, schema, dispatch)", test_list_directory),
+        ("7c. Heredoc Guard (refuse payload edits, opener-aware edits pass)", test_replace_in_file_heredoc_guard),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),
         ("9. Test Harness Two-Block Code Extraction", test_harness_code_extraction),
         ("10. VRAM profiles: table, aliases, runtime switching, env overrides", test_vram_config_and_options),

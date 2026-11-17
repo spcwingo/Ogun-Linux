@@ -104,7 +104,7 @@ BUILTIN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "replace_in_file",
-            "description": "Replace an exact block of text in an existing file.",
+            "description": "Replace an exact block of text in an existing file. In shell scripts, an edit whose match lies inside a heredoc block (the lines between a '<<EOF' opener and its terminator) is refused, because heredocs usually generate other scripts; include the heredoc opening line in old_text if editing the generated script is truly intended.",
             "parameters": {
                 "type": "object",
                 "properties": {
