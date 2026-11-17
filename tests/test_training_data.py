@@ -1086,6 +1086,59 @@ def test_sft_replay_and_dataset_caps():
     print("  SFT replay validation + dataset caps/dedup verified")
 
 
+def test_sft_v7_stock_formatting_and_openai_schemas():
+    import build_sft_dataset_v7 as sft7
+    legacy = [{"type": "function", "function": {"name": "lookup", "description": "Look up.",
+                                                 "required": ["query"], "params": {"query": {"type": "string"}}}}]
+    norm = sft7.tools_to_openai_schema(legacy)
+    fn = norm[0]["function"]
+    assert fn["parameters"]["properties"] == {"query": {"type": "string"}}, f"params must become properties: {fn}"
+    assert fn["parameters"]["required"] == ["query"], f"required must move into parameters: {fn}"
+    assert "params" not in fn and "required" not in fn, f"Legacy keys must not survive: {fn}"
+    turn = {"content": "Checking Alice.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Alice"}}]}
+    rendered = sft7.format_assistant_turn_stock(turn)
+    expected = 'Checking Alice.\n<tool_call>\n{"name": "lookup", "arguments": {"query": "Alice"}}\n</tool_call>'
+    assert rendered == expected, f"Stock formatting must join with a single newline:\n{rendered!r}\n!=\n{expected!r}"
+    assert "\n\n<tool_call>" not in rendered, "The v5/v6 blank-line join must not appear"
+    item = {
+        "tools": [{"name": "lookup", "description": "Look up.", "required": ["query"], "params": {"query": {"type": "string"}}}],
+        "messages": [
+            {"role": "user", "content": "Look up Alice."},
+            {"role": "assistant", "content": "Checking Alice.", "tool_calls": [{"name": "lookup", "arguments": {"query": "Alice"}}]},
+            {"role": "tool", "content": '{"status": 200}'},
+            {"role": "assistant", "content": "Alice is in sales."},
+        ],
+    }
+    tool_ex = sft7.collect_tool_examples_v7([item])
+    assert len(tool_ex) == 1, f"Expected 1 v7 tool example, got {len(tool_ex)}"
+    assert '"parameters"' in tool_ex[0]["prompt"], "Prompt tools must be canonical OpenAI shape"
+    assert tool_ex[0]["completion"] == expected, f"v7 completion must be stock-formatted: {tool_ex[0]['completion']!r}"
+    print("  SFT v7 stock formatting + OpenAI schema normalization verified")
+
+
+def test_sft_v7_synthetics():
+    from pathlib import Path
+    import build_sft_dataset_v7 as sft7
+    bash = sft7.collect_bash_synthetic(seed=3, cap=50)
+    assert len(bash) == 50, f"Expected 50 bash synthetics, got {len(bash)}"
+    for ex in bash:
+        assert '"name": "bash"' in ex["prompt"], "Bash prompt must present the bash tool"
+        assert ex["completion"].count("<tool_call>") == 1, f"Bash completion must be one call: {ex['completion'][:80]}"
+        assert '"name": "bash"' in ex["completion"], "Bash completion must call bash"
+    repo_root = Path(__file__).resolve().parents[1]
+    system_prompt, schemas = sft7.load_ogun_context(repo_root)
+    assert system_prompt.startswith("You are Ogun"), "Ogun system prompt must come from ogun_core/config.py"
+    names = sorted(s["function"]["name"] for s in schemas)
+    assert names == ["check_syntax", "create_plugin", "list_directory", "list_plugins",
+                     "read_file", "replace_in_file", "run_python_test", "write_file"], f"Ogun schemas drifted: {names}"
+    ogun = sft7.collect_ogun_synthetic(seed=3, cap=40, repo_root=repo_root)
+    assert len(ogun) == 40, f"Expected 40 ogun synthetics, got {len(ogun)}"
+    for ex in ogun:
+        assert "You are Ogun" in ex["prompt"], "Ogun prompt must carry the real system prompt"
+        assert "<tool_call>" in ex["completion"], "Ogun completion must be a canonical call"
+    print("  SFT v7 synthetics verified: bash probe shape + real Ogun context")
+
+
 # ==============================================================================
 # MAIN TEST RUNNER
 # ==============================================================================
@@ -1106,6 +1159,8 @@ if __name__ == "__main__":
         test_agentforge_wrapper_pairs,
         test_sft_tool_and_final_examples,
         test_sft_replay_and_dataset_caps,
+        test_sft_v7_stock_formatting_and_openai_schemas,
+        test_sft_v7_synthetics,
         test_nl2bash_mapper,
         test_magicoder_shell_mapper,
         test_shell_corruptor_ops,
