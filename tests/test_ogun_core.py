@@ -719,6 +719,81 @@ def test_replace_in_file_heredoc_guard() -> None:
             del os.environ["OGUN_HEREDOC_GUARD"]
 
 
+def test_shell_check_after_edit() -> None:
+    """Shell verification: write_file/replace_in_file run sh -n (and
+    ShellCheck when installed) on shell files and report failures in the
+    tool result; check_syntax handles shell files; env override disables."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        project = root / "project"
+        install = root / "install"
+        project.mkdir()
+        install.mkdir()
+        guard = PathSecurityGuard(
+            base_dir=project, allowed_dirs=[project], protect_root=install
+        )
+
+        clean = "#!/bin/sh\necho ok\n"
+        res = write_file("workspace/clean.sh", clean, security_guard=guard)
+        assert "Successfully created" in res
+        assert "Shell check: OK" in res, res
+
+        # A syntactically broken script is written, but the result says so.
+        broken = "#!/bin/sh\nif [ x ]; then\n    echo hi\n"
+        res_bad = write_file("workspace/broken.sh", broken, security_guard=guard)
+        assert "Successfully created" in res_bad
+        assert "SYNTAX CHECK FAILED" in res_bad, res_bad
+
+        # An edit that breaks syntax is flagged in the replace result.
+        res_break = replace_in_file(
+            "workspace/clean.sh", "echo ok", "if [ x ]; then", count=1, security_guard=guard
+        )
+        assert "Successfully updated" in res_break
+        assert "SYNTAX CHECK FAILED" in res_break, res_break
+
+        # Repair it with a clean edit: OK note, no failure text.
+        res_fix = replace_in_file(
+            "workspace/clean.sh", "if [ x ]; then", "echo fixed", count=1, security_guard=guard
+        )
+        assert "Shell check: OK" in res_fix, res_fix
+        assert "FAILED" not in res_fix
+
+        # check_syntax speaks shell for shell files, Python for the rest.
+        bad_verdict = check_syntax("workspace/broken.sh", base_dir=project)
+        assert bad_verdict.startswith("SyntaxError"), bad_verdict
+        ok_verdict = check_syntax("workspace/clean.sh", base_dir=project)
+        assert ok_verdict.startswith("Syntax OK"), ok_verdict
+        py_verdict = check_syntax("def broken(:\n    pass")
+        assert "SyntaxError" in py_verdict
+
+        # ShellCheck scoping, when shellcheck is available: an unquoted
+        # variable introduced by an edit is flagged by line; the same
+        # construct on an untouched line is not reported.
+        if shutil.which("shellcheck"):
+            scoped = "#!/bin/sh\necho $untouched\necho marker\n"
+            assert "Successfully created" in write_file(
+                "workspace/scoped.sh", scoped, security_guard=guard
+            )
+            res_scoped = replace_in_file(
+                "workspace/scoped.sh",
+                "echo marker",
+                "echo $introduced",
+                count=1,
+                security_guard=guard,
+            )
+            assert ":3:" in res_scoped, res_scoped
+            assert ":2:" not in res_scoped, res_scoped
+
+        # OGUN_SHELL_CHECK=0 silences the verification entirely.
+        os.environ["OGUN_SHELL_CHECK"] = "0"
+        try:
+            res_off = write_file("workspace/off.sh", broken, security_guard=guard)
+            assert "Successfully created" in res_off
+            assert "Shell check" not in res_off and "SYNTAX CHECK" not in res_off, res_off
+        finally:
+            del os.environ["OGUN_SHELL_CHECK"]
+
+
 def test_list_directory() -> None:
     """Test list_directory: entries, hidden filtering, errors, schema, dispatch."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1167,6 +1242,7 @@ def run_all_tests() -> bool:
         ("7. Codetools Operations (Write, Replace, Read, Syntax)", test_codetools_operations),
         ("7b. list_directory (entries, hidden, errors, schema, dispatch)", test_list_directory),
         ("7c. Heredoc Guard (refuse payload edits, opener-aware edits pass)", test_replace_in_file_heredoc_guard),
+        ("7d. Shell Verification (sh -n after edits, ShellCheck scoped, check_syntax)", test_shell_check_after_edit),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),
         ("9. Test Harness Two-Block Code Extraction", test_harness_code_extraction),
         ("10. VRAM profiles: table, aliases, runtime switching, env overrides", test_vram_config_and_options),

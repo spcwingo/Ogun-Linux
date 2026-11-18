@@ -10,6 +10,7 @@ import difflib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Union
@@ -157,6 +158,95 @@ def _heredoc_guard_error(
     return None
 
 
+# --- Shell verification ------------------------------------------------------
+# After a shell file is written or edited, verify the result mechanically:
+# `sh -n` for syntax, and ShellCheck (when installed) for the lines the
+# edit touched. Findings are appended to the tool result so the model must
+# react to its own breakage inside the same turn instead of the user
+# discovering it later. A pre-existing ShellCheck backlog elsewhere in the
+# file is NOT reported — only the edited lines are the caller's business.
+
+_SHELLCHECK_LINE_RE = re.compile(r"^.+?:(\d+):\d+:\s*(\w+):\s*(.*)$")
+
+
+def _run_quiet(cmd: List[str], timeout: float = 20.0) -> Optional[subprocess.CompletedProcess]:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def _shell_check_note(
+    target: Path,
+    content: str,
+    spans: Optional[List[tuple[int, int]]] = None,
+) -> str:
+    """Post-edit shell verification note for a tool result ('' when silent).
+
+    spans bounds the 1-based line ranges the edit changed; ShellCheck
+    findings are reported only for those lines (None = whole file).
+    A clean run yields a one-line OK note when at least one checker ran.
+    Disable with OGUN_SHELL_CHECK=0.
+    """
+    if os.environ.get("OGUN_SHELL_CHECK", "1") == "0":
+        return ""
+    if not _looks_like_shell_script(target, content):
+        return ""
+
+    notes: List[str] = []
+    sh_bin = shutil.which("sh")
+    if sh_bin:
+        proc = _run_quiet([sh_bin, "-n", str(target)])
+        if proc is not None and proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            if len(detail) > 600:
+                detail = detail[:600] + "…"
+            notes.append(
+                "SHELL SYNTAX CHECK FAILED (sh -n) — the file does not parse:\n"
+                + detail
+                + "\nFix this before continuing; do not leave the file broken."
+            )
+    shellcheck = shutil.which("shellcheck")
+    if shellcheck:
+        proc = _run_quiet([shellcheck, "-f", "gcc", str(target)])
+        if proc is not None and proc.stdout:
+            findings: List[str] = []
+            for line in proc.stdout.splitlines():
+                m = _SHELLCHECK_LINE_RE.match(line.strip())
+                if not m:
+                    continue
+                lineno = int(m.group(1))
+                if spans is not None and not any(a <= lineno <= b for a, b in spans):
+                    continue
+                findings.append(line.strip())
+            if findings:
+                shown = findings[:20]
+                extra = len(findings) - len(shown)
+                notes.append(
+                    "ShellCheck findings in the lines you just changed:\n"
+                    + "\n".join(shown)
+                    + (f"\n…and {extra} more in the changed lines." if extra > 0 else "")
+                )
+    if notes:
+        return "\n" + "\n".join(notes)
+    if sh_bin or shellcheck:
+        ok = "\nShell check: OK (sh -n passed"
+        if shellcheck:
+            ok += ", no ShellCheck findings in the changed lines"
+        return ok + ")."
+    return ""
+
+
+def _shell_syntax_verdict(target: Path, content: str) -> str:
+    """check_syntax verdict for a shell file: sh -n plus full-file ShellCheck."""
+    if os.environ.get("OGUN_SHELL_CHECK", "1") == "0":
+        return "Syntax OK (shell verification disabled via OGUN_SHELL_CHECK=0)"
+    note = _shell_check_note(target, content)
+    if "SYNTAX CHECK FAILED" in note:
+        return "SyntaxError — " + note.strip()
+    return "Syntax OK" + note
+
+
 def read_file(
     filepath: str,
     start_line: Optional[int] = None,
@@ -275,7 +365,8 @@ def write_file(
         normalized = content.replace("\r\n", "\n")
         target.write_text(normalized, encoding="utf-8")
         line_count = len(normalized.splitlines())
-        return f"Successfully created '{filepath}' ({len(normalized)} bytes, {line_count} lines)."
+        note = _shell_check_note(target, normalized)
+        return f"Successfully created '{filepath}' ({len(normalized)} bytes, {line_count} lines).{note}"
     except Exception as exc:
         return f"Error writing file '{filepath}': {exc}"
 
@@ -337,13 +428,23 @@ def replace_in_file(
     updated = content.replace(clean_old, clean_new, count)
     try:
         target.write_text(updated, encoding="utf-8")
-        return f"Successfully updated '{filepath}' ({occurrences} replacement(s) made)."
+        spans: List[tuple[int, int]] = []
+        search_from = 0
+        for _ in range(count):
+            idx = updated.find(clean_new, search_from)
+            if idx == -1:
+                break
+            start_line = updated.count("\n", 0, idx) + 1
+            spans.append((start_line, start_line + clean_new.count("\n")))
+            search_from = idx + max(1, len(clean_new))
+        note = _shell_check_note(target, updated, spans)
+        return f"Successfully updated '{filepath}' ({occurrences} replacement(s) made).{note}"
     except Exception as exc:
         return f"Error saving changes to '{filepath}': {exc}"
 
 
 def check_syntax(path_or_code: str, base_dir: Optional[Path] = None) -> str:
-    """Verify Python syntax via ast.parse. Accepts a file path or raw code string."""
+    """Verify syntax: Python via ast.parse; shell files via sh -n / ShellCheck."""
     root = (base_dir or OGUN_ROOT).resolve()
     code = path_or_code
     p = Path(path_or_code.strip().strip('"').strip("'"))
@@ -357,6 +458,8 @@ def check_syntax(path_or_code: str, base_dir: Optional[Path] = None) -> str:
             code = cand.read_text(encoding="utf-8", errors="replace")
         except Exception as exc:
             return f"Error reading file for syntax check: {exc}"
+        if _looks_like_shell_script(cand, code):
+            return _shell_syntax_verdict(cand, code)
 
     try:
         ast.parse(code)

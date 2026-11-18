@@ -89,7 +89,7 @@ BUILTIN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create and write a NEW file. Refuses to overwrite existing files.",
+            "description": "Create and write a NEW file. Refuses to overwrite existing files. Shell files are verified after writing (sh -n, plus ShellCheck when installed) and any failure is returned with the result.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -104,7 +104,7 @@ BUILTIN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "replace_in_file",
-            "description": "Replace an exact block of text in an existing file. In shell scripts, an edit whose match lies inside a heredoc block (the lines between a '<<EOF' opener and its terminator) is refused, because heredocs usually generate other scripts; include the heredoc opening line in old_text if editing the generated script is truly intended.",
+            "description": "Replace an exact block of text in an existing file. In shell scripts, an edit whose match lies inside a heredoc block (the lines between a '<<EOF' opener and its terminator) is refused, because heredocs usually generate other scripts; include the heredoc opening line in old_text if editing the generated script is truly intended. Shell files are verified after each edit (sh -n, plus ShellCheck on the changed lines when installed) and any failure is returned with the result.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -121,7 +121,7 @@ BUILTIN_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "check_syntax",
-            "description": "Verify Python syntax via AST parser on a file or code string.",
+            "description": "Verify syntax of a file or code string: Python via the AST parser; shell scripts via sh -n plus ShellCheck when installed.",
             "parameters": {
                 "type": "object",
                 "properties": {
