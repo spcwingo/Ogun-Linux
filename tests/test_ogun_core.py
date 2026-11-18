@@ -794,6 +794,138 @@ def test_shell_check_after_edit() -> None:
             del os.environ["OGUN_SHELL_CHECK"]
 
 
+_FAKE_CHECKBASHISMS = """#!/usr/bin/env python3
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8", errors="replace") as fh:
+    for i, line in enumerate(fh, 1):
+        if "echo -e" in line:
+            print(f"possible bashism in {path} line {i} (echo -e):")
+            print(line.rstrip())
+"""
+
+
+def test_checkbashisms_and_shebang_guard() -> None:
+    """checkbashisms stage: runs for POSIX-sh shebangs only (bash scripts
+    skipped), findings scoped to changed lines; replace_in_file warns when
+    an edit rewrites the shebang line."""
+    from ogun_core.codetools import _parse_checkbashisms, _targets_posix_sh
+
+    # Shebang gating (pure).
+    assert _targets_posix_sh("#!/bin/sh\necho hi\n")
+    assert _targets_posix_sh("#!/bin/dash\n")
+    assert _targets_posix_sh("#!/usr/bin/env sh\n")
+    assert _targets_posix_sh("#!/bin/ash\n")
+    assert not _targets_posix_sh("#!/bin/bash\necho hi\n")
+    assert not _targets_posix_sh("#!/usr/bin/env bash\n")
+    assert not _targets_posix_sh("#!/bin/zsh\n")
+    assert not _targets_posix_sh("echo hi\n")
+
+    # Output parsing (pure): header lines only, echoed source lines ignored.
+    sample = (
+        "possible bashism in /tmp/x.sh line 4 (echo -e):\n"
+        "echo -e hi\n"
+        "possible bashism in /tmp/x.sh line 12 (arrays):\n"
+        "a=(1 2)\n"
+    )
+    parsed = _parse_checkbashisms(sample)
+    assert [n for n, _ in parsed] == [4, 12], parsed
+    assert "line 4" in parsed[0][1]
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir).resolve()
+        project = root / "project"
+        install = root / "install"
+        project.mkdir()
+        install.mkdir()
+        guard = PathSecurityGuard(
+            base_dir=project, allowed_dirs=[project], protect_root=install
+        )
+
+        # A fake checkbashisms on PATH: flags 'echo -e' with real line numbers.
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "checkbashisms"
+        fake.write_text(_FAKE_CHECKBASHISMS, encoding="utf-8")
+        fake.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(bin_dir) + os.pathsep + old_path
+        try:
+            # POSIX script with a bashism: flagged on write (whole file).
+            res = write_file(
+                "workspace/posix.sh",
+                "#!/bin/sh\necho -e hi\necho ok\n",
+                security_guard=guard,
+            )
+            assert "checkbashisms findings in the lines you just changed" in res, res
+            assert "line 2" in res, res
+
+            # Clean POSIX script: the OK note names checkbashisms as run.
+            res_clean = write_file(
+                "workspace/clean.sh", "#!/bin/sh\necho ok\n", security_guard=guard
+            )
+            assert "no checkbashisms findings" in res_clean, res_clean
+
+            # Bash script: checkbashisms never runs, never mentioned.
+            res_bash = write_file(
+                "workspace/strict.sh",
+                "#!/bin/bash\necho -e hi\n",
+                security_guard=guard,
+            )
+            assert "checkbashisms" not in res_bash, res_bash
+
+            # Scoping: a bashism on an untouched line is not reported; one
+            # introduced by the edit is.
+            scoped = "#!/bin/sh\necho -e untouched\necho marker\n"
+            assert "Successfully created" in write_file(
+                "workspace/scoped.sh", scoped, security_guard=guard
+            )
+            res_other = replace_in_file(
+                "workspace/scoped.sh",
+                "echo marker",
+                "echo done",
+                count=1,
+                security_guard=guard,
+            )
+            assert "checkbashisms findings in the lines you just changed" not in res_other, res_other
+            res_hit = replace_in_file(
+                "workspace/scoped.sh",
+                "echo done",
+                "echo -e introduced",
+                count=1,
+                security_guard=guard,
+            )
+            assert "checkbashisms findings in the lines you just changed" in res_hit, res_hit
+            assert "line 3" in res_hit, res_hit
+
+            # check_syntax parity: whole-file checkbashisms on POSIX files,
+            # none on bash files.
+            verdict = check_syntax("workspace/posix.sh", base_dir=project)
+            assert "checkbashisms findings in the lines you just changed" in verdict, verdict
+            bash_verdict = check_syntax("workspace/strict.sh", base_dir=project)
+            assert "checkbashisms" not in bash_verdict, bash_verdict
+        finally:
+            os.environ["PATH"] = old_path
+
+        # Shebang rewrite warning: fires when line 1 changes, silent otherwise.
+        res_shebang = replace_in_file(
+            "workspace/clean.sh",
+            "#!/bin/sh",
+            "#!/bin/sh fellow",
+            count=1,
+            security_guard=guard,
+        )
+        assert "WARNING: this edit changed the file's shebang line" in res_shebang, res_shebang
+        res_normal = replace_in_file(
+            "workspace/clean.sh",
+            "echo ok",
+            "echo still ok",
+            count=1,
+            security_guard=guard,
+        )
+        assert "WARNING" not in res_normal, res_normal
+
+
 def test_list_directory() -> None:
     """Test list_directory: entries, hidden filtering, errors, schema, dispatch."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1243,6 +1375,7 @@ def run_all_tests() -> bool:
         ("7b. list_directory (entries, hidden, errors, schema, dispatch)", test_list_directory),
         ("7c. Heredoc Guard (refuse payload edits, opener-aware edits pass)", test_replace_in_file_heredoc_guard),
         ("7d. Shell Verification (sh -n after edits, ShellCheck scoped, check_syntax)", test_shell_check_after_edit),
+        ("7e. checkbashisms (POSIX-only, scoped) & Shebang-Change Warning", test_checkbashisms_and_shebang_guard),
         ("8. UTF-8 Non-ASCII Subprocess Output (Charmap Trap)", test_utf8_subprocess_output),
         ("9. Test Harness Two-Block Code Extraction", test_harness_code_extraction),
         ("10. VRAM profiles: table, aliases, runtime switching, env overrides", test_vram_config_and_options),

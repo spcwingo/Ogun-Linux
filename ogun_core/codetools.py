@@ -50,20 +50,26 @@ _SHELL_SUFFIXES = {".sh", ".bash", ".ash", ".ksh", ".zsh"}
 _SHELL_INTERPRETERS = {"sh", "bash", "ash", "dash", "ksh", "zsh", "mksh"}
 
 
+def _shebang_interpreter(content: str) -> str:
+    """Interpreter basename named by the shebang line ('' when there is none)."""
+    first = content.split("\n", 1)[0] if content else ""
+    if not first.startswith("#!"):
+        return ""
+    tokens = first[2:].split()
+    if not tokens:
+        return ""
+    interp = Path(tokens[0]).name
+    if interp == "env":
+        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        interp = Path(rest[0]).name if rest else ""
+    return interp
+
+
 def _looks_like_shell_script(target: Path, content: str) -> bool:
     """True for .sh-family files and extensionless files with a shell shebang."""
     if target.suffix.lower() in _SHELL_SUFFIXES:
         return True
-    first = content.split("\n", 1)[0] if content else ""
-    if not first.startswith("#!"):
-        return False
-    tokens = first[2:].split()
-    if not tokens:
-        return False
-    interp = Path(tokens[0]).name
-    if interp == "env":
-        interp = Path(tokens[1]).name if len(tokens) > 1 else ""
-    return interp in _SHELL_INTERPRETERS
+    return _shebang_interpreter(content) in _SHELL_INTERPRETERS
 
 
 def _heredoc_body_spans(content: str) -> List[tuple[int, int, str, int]]:
@@ -161,12 +167,64 @@ def _heredoc_guard_error(
 # --- Shell verification ------------------------------------------------------
 # After a shell file is written or edited, verify the result mechanically:
 # `sh -n` for syntax, and ShellCheck (when installed) for the lines the
-# edit touched. Findings are appended to the tool result so the model must
-# react to its own breakage inside the same turn instead of the user
-# discovering it later. A pre-existing ShellCheck backlog elsewhere in the
-# file is NOT reported — only the edited lines are the caller's business.
+# edit touched. Scripts whose shebang targets POSIX sh (sh/dash/ash) also
+# get checkbashisms (when installed) on those same lines — ShellCheck's sh
+# mode is lenient about some constructs that fail outright under dash or
+# BusyBox ash. Scripts with a bash (or other non-POSIX) shebang are
+# deliberately skipped by checkbashisms: their dialect is bash by design.
+# Findings are appended to the tool result so the model must react to its
+# own breakage inside the same turn instead of the user discovering it
+# later. A pre-existing backlog elsewhere in the file is NOT reported —
+# only the edited lines are the caller's business.
 
 _SHELLCHECK_LINE_RE = re.compile(r"^.+?:(\d+):\d+:\s*(\w+):\s*(.*)$")
+_CHECKBASHISMS_RE = re.compile(r"^possible bashism in .+ line (\d+)\b.*$")
+_POSIX_INTERPRETERS = {"sh", "dash", "ash"}
+
+
+def _targets_posix_sh(content: str) -> bool:
+    """True when the shebang names a POSIX sh interpreter (sh/dash/ash).
+
+    Bash, zsh, ksh and shebang-less files return False: checkbashisms only
+    makes sense where POSIX sh is the actual target dialect.
+    """
+    return _shebang_interpreter(content) in _POSIX_INTERPRETERS
+
+
+def _parse_checkbashisms(output: str) -> List[tuple[int, str]]:
+    """(line number, message) pairs from checkbashisms output.
+
+    Findings look like 'possible bashism in FILE line 12 (echo -e):'
+    followed by the offending source line, which is not a finding itself.
+    """
+    findings: List[tuple[int, str]] = []
+    for line in output.splitlines():
+        m = _CHECKBASHISMS_RE.match(line.strip())
+        if m:
+            findings.append((int(m.group(1)), line.strip()))
+    return findings
+
+
+def _shebang_change_note(old_content: str, new_content: str) -> str:
+    """Warning when an edit rewrote the file's shebang line ('' otherwise).
+
+    Insert-after-line-1 edits must reproduce the anchor line verbatim in
+    new_text; a model that paraphrases it corrupts the interpreter line in
+    a way `sh -n` cannot see (a shebang is just a comment to the parser),
+    while direct execution of the script breaks. Not gated on shell files:
+    Python and other scripts have shebangs worth protecting too.
+    """
+    old_first = old_content.split("\n", 1)[0] if old_content else ""
+    new_first = new_content.split("\n", 1)[0] if new_content else ""
+    if old_first.startswith("#!") and new_first != old_first:
+        return (
+            f"\nWARNING: this edit changed the file's shebang line from "
+            f"'{old_first}' to '{new_first}'. The shebang decides which "
+            "interpreter runs the script, and syntax checks cannot see "
+            "this change. Restore the original shebang unless changing "
+            "the interpreter was the explicit goal."
+        )
+    return ""
 
 
 def _run_quiet(cmd: List[str], timeout: float = 20.0) -> Optional[subprocess.CompletedProcess]:
@@ -183,10 +241,11 @@ def _shell_check_note(
 ) -> str:
     """Post-edit shell verification note for a tool result ('' when silent).
 
-    spans bounds the 1-based line ranges the edit changed; ShellCheck
-    findings are reported only for those lines (None = whole file).
-    A clean run yields a one-line OK note when at least one checker ran.
-    Disable with OGUN_SHELL_CHECK=0.
+    spans bounds the 1-based line ranges the edit changed; ShellCheck and
+    checkbashisms findings are reported only for those lines (None = whole
+    file). checkbashisms runs only for POSIX-sh shebangs (see
+    _targets_posix_sh). A clean run yields a one-line OK note when at
+    least one checker ran. Disable with OGUN_SHELL_CHECK=0.
     """
     if os.environ.get("OGUN_SHELL_CHECK", "1") == "0":
         return ""
@@ -227,18 +286,43 @@ def _shell_check_note(
                     + "\n".join(shown)
                     + (f"\n…and {extra} more in the changed lines." if extra > 0 else "")
                 )
+    bashisms_ran = False
+    checkbashisms = shutil.which("checkbashisms")
+    if checkbashisms and _targets_posix_sh(content):
+        bashisms_ran = True
+        proc = _run_quiet([checkbashisms, str(target)])
+        if proc is not None:
+            raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            hits = [
+                (n, msg)
+                for n, msg in _parse_checkbashisms(raw)
+                if spans is None or any(a <= n <= b for a, b in spans)
+            ]
+            if hits:
+                shown = hits[:20]
+                extra = len(hits) - len(shown)
+                notes.append(
+                    "checkbashisms findings in the lines you just changed — "
+                    "this script targets POSIX sh, so these constructs fail "
+                    "under dash/BusyBox ash:\n"
+                    + "\n".join(msg for _, msg in shown)
+                    + (f"\n…and {extra} more in the changed lines." if extra > 0 else "")
+                )
     if notes:
         return "\n" + "\n".join(notes)
-    if sh_bin or shellcheck:
+    if sh_bin or shellcheck or bashisms_ran:
         ok = "\nShell check: OK (sh -n passed"
         if shellcheck:
             ok += ", no ShellCheck findings in the changed lines"
+        if bashisms_ran:
+            ok += ", no checkbashisms findings in the changed lines"
         return ok + ")."
     return ""
 
 
 def _shell_syntax_verdict(target: Path, content: str) -> str:
-    """check_syntax verdict for a shell file: sh -n plus full-file ShellCheck."""
+    """check_syntax verdict for a shell file: sh -n, plus full-file
+    ShellCheck and (for POSIX-sh shebangs) checkbashisms."""
     if os.environ.get("OGUN_SHELL_CHECK", "1") == "0":
         return "Syntax OK (shell verification disabled via OGUN_SHELL_CHECK=0)"
     note = _shell_check_note(target, content)
@@ -438,6 +522,7 @@ def replace_in_file(
             spans.append((start_line, start_line + clean_new.count("\n")))
             search_from = idx + max(1, len(clean_new))
         note = _shell_check_note(target, updated, spans)
+        note += _shebang_change_note(content, updated)
         return f"Successfully updated '{filepath}' ({occurrences} replacement(s) made).{note}"
     except Exception as exc:
         return f"Error saving changes to '{filepath}': {exc}"
